@@ -51,7 +51,8 @@ def init():
         for col in ("tp1_x REAL", "tp2_x REAL", "sl_x REAL",
                     "caller_id INTEGER", "caller_name TEXT", "buy_tx TEXT",
                     "peak_price REAL", "closed_at INTEGER",
-                    "is_simulated INTEGER DEFAULT 0"):
+                    "is_simulated INTEGER DEFAULT 0",
+                    "tp2_done INTEGER DEFAULT 0"):
             try:
                 c.execute(f"ALTER TABLE positions ADD COLUMN {col}")
             except sqlite3.OperationalError:

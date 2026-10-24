@@ -67,6 +67,9 @@ SETTING_DEFAULTS = {
     "tp2":            "1.00",
     "sl":             "-0.30",
     "tp1_sell_pct":   "0.50",
+    # --- Exit 3 lapis: TP2 jual 50% sisa, sisa jadi moonbag trailing 20% ---
+    "tp2_sell_pct":   "0.50",
+    "moonbag_trail_pct": "0.20",
     "tp_verify":      "1",
     "rug_liq_drop":   "0.40",
     "trail_on":       "1",
@@ -157,6 +160,8 @@ SETTING_LABELS = {
     "tp2":           "🎯 TP2 (1.0 = +100%)",
     "sl":            "🛑 SL (-0.3 = -30%)",
     "tp1_sell_pct":  "📤 Jual di TP1 (0.5 = 50%)",
+    "tp2_sell_pct":  "🎯 TP2: porsi sisa yang dijual (0.50 = 50%, 1.0 = full close)",
+    "moonbag_trail_pct": "🚀 Moonbag: jarak trailing stop dari puncak (0.20 = 20%)",
     "tp_verify":     "🫧 Verifikasi TP anti-wick (1/0)",
     "rug_liq_drop":  "🚨 Rug: liq drop trigger (0.4=40%)",
     "trail_on":      "📈 Trailing stop setelah TP1 (1/0)",

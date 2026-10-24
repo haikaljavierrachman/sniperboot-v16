@@ -198,8 +198,18 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
             db.update_position(pos_id, tokens_left=left, tp1_done=1)
             text = f"✅ **TP1** {tag}\n{nums}\nhold moonbag {left:,.0f}{warn}"
     elif reason == "tp2":
-        db.update_position(pos_id, tokens_left=0, status="closed_tp2", closed_at=now)
-        text = f"🎯 **TP2** {tag}\n{nums}\nposisi CLOSED{warn}"
+        if left <= 0 or fraction >= 1.0:
+            db.update_position(pos_id, tokens_left=0, tp2_done=1, status="closed_tp2", closed_at=now)
+            text = f"🎯 **TP2 — full exit** {tag}\n{nums}\nposisi CLOSED{warn}"
+        else:
+            # 🚀 Exit 3 lapis: sisa koin jadi moonbag lapis 3 — dijaga
+            # trailing stop moonbag_trail_pct dari puncak, bebas time-stop.
+            db.update_position(pos_id, tokens_left=left, tp2_done=1)
+            trail_p = float(db.get("moonbag_trail_pct", float) or 0.20) * 100
+            text = (f"🎯 **TP2** {tag}\n{nums}\n"
+                    f"🚀 **HOLD MOONBAG LAPIS 3** ({left:,.0f} tokens)\n"
+                    f"• Dijaga Trailing Stop {trail_p:.0f}% dari puncak\n"
+                    f"• Bebas dari Time-Stop 20m{warn}")
     elif reason == "sl":
         db.update_position(pos_id, tokens_left=0, status="closed_sl", closed_at=now)
         text = f"🛑 **STOP LOSS** {tag}\n{nums}\nposisi CLOSED{warn}"
@@ -300,7 +310,10 @@ async def _check(pos):
         max_hold_sec = 1200
     now_ts = int(_t.time())
     pos_age = now_ts - (pos.get("ts") or now_ts)
-    if max_hold_sec > 0 and pos_age >= max_hold_sec:
+    # 🚀 Time-Stop Exemption: moonbag lapis 3 (tp2_done=1) sudah 100%
+    # house money — bebas dari time-stop, biarkan mengejar runner 3x-5x.
+    # Rug monitor & trailing stop tetap aktif untuk posisi ini.
+    if max_hold_sec > 0 and pos_age >= max_hold_sec and not pos.get("tp2_done"):
         _cleanup(pos["id"])
         await _notify(await execute_sell(pos["id"], 1.0, "timeout"))
         return
@@ -390,8 +403,14 @@ async def _check(pos):
             return
 
         # ---------- 4) setelah TP1: breakeven lock + trailing stop ----------
+        # Moonbag lapis 3 (tp2_done=1) pakai jarak trailing sendiri
+        # (moonbag_trail_pct, default 20%) — bukan trail_pct biasa (25%).
         if pos["tp1_done"] and db.get("trail_on", str) == "1":
-            stop_level = max(pos["entry_price_usd"], peak * (1 - db.get("trail_pct")))
+            if pos.get("tp2_done"):
+                trail_dist = float(db.get("moonbag_trail_pct", float) or 0.20)
+            else:
+                trail_dist = db.get("trail_pct")
+            stop_level = max(pos["entry_price_usd"], peak * (1 - trail_dist))
             if price <= stop_level:
                 _cleanup(pos["id"])
                 await _notify(await execute_sell(pos["id"], 1.0, "trail"))
@@ -402,9 +421,10 @@ async def _check(pos):
             return
 
         verify = (db.get("tp_verify", str) == "1") and not pos.get("is_simulated")
-        if pnl >= tp2_v and db.get("tp2_on", str) == "1":
+        if pnl >= tp2_v and db.get("tp2_on", str) == "1" and not pos.get("tp2_done"):
+            frac = float(db.get("tp2_sell_pct", float) or 0.50)
             if verify:
-                ep = await asyncio.to_thread(_trader.exec_pnl, pos, 1.0)
+                ep = await asyncio.to_thread(_trader.exec_pnl, pos, frac)
                 if ep < tp2_v * 0.7:
                     if pos["id"] not in _thin_warned:
                         _thin_warned.add(pos["id"])
@@ -412,8 +432,9 @@ async def _check(pos):
                             f"🫧 **{pos['symbol']}** layar {pnl*100:+.0f}% tapi hasil jual asli "
                             f"cuma {ep*100:+.0f}% (pool tipis) — TP2 ditahan, tunggu depth")
                     return
-            _cleanup(pos["id"])
-            await _notify(await execute_sell(pos["id"], 1.0, "tp2"))
+            if frac >= 1.0:
+                _cleanup(pos["id"])
+            await _notify(await execute_sell(pos["id"], frac, "tp2"))
         elif pnl >= tp1_v and not pos["tp1_done"]:
             frac = db.get("tp1_sell_pct")
             if verify:
