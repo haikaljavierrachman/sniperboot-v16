@@ -97,7 +97,9 @@ def _agent_card(pair, ca, src_name, decision, mode, min_conv=None) -> str:
     conv = decision.get("conviction", "?")
 
     if mode == "LATIHAN":
-        head = f"🧪 **MODE LATIHAN — MATA MAU BUY {sym}** _via {src_name}_"
+        entry_mode = db.get("entry_mode", str) or "fast"
+        prefix = "FAST-PATH" if entry_mode == "fast" else "MATA"
+        head = f"🧪 **MODE LATIHAN — {prefix} BUY {sym}** _via {src_name}_"
     elif mode == "RAGU":
         head = f"👁 **MATA RAGU → SKIP — {sym}** _via {src_name}_"
     else:
@@ -549,14 +551,14 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         max_drift = float(db.get("agent_max_drift") or 0.50)
         if fresh_price > 0 and agent.check_staleness(initial_price, fresh_price, max_drift):
             await _notify(
-                f"⏳ **MATA BUY {sym} DIBATALKAN — HARGA STALE** _via {src['name']}_\n"
+                f"⚡ **FAST-PATH BUY {sym} DIBATALKAN — HARGA STALE** _via {src['name']}_\n"
                 f"`{ca}`\n"
                 f"harga saat evaluasi ${initial_price:.10f} → saat eksekusi ${fresh_price:.10f} "
                 f"(drift {((fresh_price/initial_price-1)*100) if initial_price > 0 else 0:.1f}% "
                 f"> {max_drift*100:.0f}%)\n"
                 f"alasan: price_stale_drift")
             print(f"[staleness-skip] {sym}: harga sudah drift > {max_drift*100:.0f}% "
-                  f"sejak MATA evaluasi — buy dibatalkan")
+                  f"sejak evaluasi FAST-PATH — buy dibatalkan")
             return "skip_agent:price_stale_drift"
     if decision and db.get("agent_dry_run", str) == "1":
         # ---------- 🧪 VIRTUAL PAPER TRADING (mode LATIHAN) ----------
