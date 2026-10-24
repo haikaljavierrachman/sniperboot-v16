@@ -1,0 +1,343 @@
+"""🕵️ INSIDER TRACKER (v16.1) — listener copy-trade on-chain.
+
+Sumber sinyal KETIGA HoodSniper: memantau transaksi blok baru di Robinhood
+Chain (chainId 4663), mengecek apakah pengirimnya wallet insider (hasil
+screening tools/screen_insiders.py, tersimpan di tabel insider_wallets),
+lalu kalau insider itu memanggil SwapRouter02 untuk BUY token → dikirim ke
+pipa bot yang sama (listener.process_ca, allow_buy=True).
+
+Desain:
+- Async loop INDEPENDEN (task background bot.py), on/off via setting tracker_on.
+- Fingerprint calldata Uniswap: selector 4 byte pertama.
+    exactInputSingle = 0x414bf389  (input pertama = chunk abi-encoded
+      tokenIn(32) | tokenOut(32) | fee(32) | recipient(32) | ...)
+    exactInput       = 0xc04b8d59  (path bytes multicall — diekstrak regex)
+    multicall(bytes[]) = 0xac9650d8 — byte-data tiap sub-call dianalisis rekursif
+- ROUTE_SELECTOR fallback: kalau `to` adalah router tapi selector tak dikenali,
+  tokenOut dicari dari alamat yang bukan WETH/USDG sentinel di raw data.
+- Anti-melewatkan blok: packet per geth 'newHeads' ~2 dtk → probe kumpulan blok
+  dari latest-1 (fingerprint finger_blok terakhir) sampai beberapa dtk penuh
+  (BLOCK_GRACE). Finger bertahan lintas restart agar blok tidak dipindai ulang.
+- Aman diganggu RPC gagal: try/except + sleep; loop tidak mati.
+- Deadlock-free: Router py 直 punya executor sendiri, AMBIL KONTRAK SEKALI
+  SAAT SETUP (di-clone per-loop agar pytest bisa patch config.RPC_URL).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+
+from . import config, db, listener
+from . import dexscreener as dx
+
+# ============================ KONSTANTA ============================
+
+SWAP_ROUTER02 = "0xCaf681a66D020601342297493863E78C959E5cb2".lower()
+
+# Selector 4-byte pertama dari calldata (fungsi Uniswap SwapRouter02)
+EXACT_INPUT_SINGLE = "0x414bf389"   # exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))
+EXACT_INPUT        = "0xc04b8d59"   # exactInput(bytes) — path ter-encode
+MULTICALL          = "0xac9650d8"   # multicall(bytes[])
+
+# Quote assets Robinhood Chain — dipakai buat membedakan tokenIn vs tokenOut
+WETH  = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73".lower()
+USDG  = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168".lower()
+NATIVE_SENTINEL = "0x0000000000000000000000000000000000000000"
+QUOTE_ASSETS = frozenset({WETH, USDG, NATIVE_SENTINEL})
+
+# Buat proteksi slippage: bandingkan harga pasar Dexscreener sebelum vs
+# sesudah stagger INSIDER processing — jika harga lari > MAX_SLIP_PCT%
+# dalam selang ini, kemungkinan insider buy di puncak momentum.
+MAX_SLIP_PCT = 5.0
+
+# Kalau insider membeli lalu harga langsung anjlok, jangan kejar.
+# (sudah tertangani listener.process_ca staleness gate + safety filter)
+
+BLOCK_GRACE = 6.0   # dtk kedaluwarsa menanti blok "hampir" terlewat
+POLL_IDLE = 0.5     # dtk kalau tidak ada blok baru (Robinhood Chain ~10 blok/dtk)
+
+# Pola deteksi token dalam path bytes (exactInput/multicall path):
+# data dexscreener adalah HEX TELANJANG (tanpa "0x"), jadi regex cari
+# run hex ≥40 karakter lalu ambil 40 karakter pertama dari tiap run
+# (alamat EVM 20B selalu muncul sebagai 40 hex di kolom kiri word).
+_HEX_RUN_RE = re.compile(r"[0-9a-fA-F]{40,}")
+_HEX40_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+# Dexscreener / Blockscout base URLs (dipakai tersier di screen_insiders, di sini
+# hanya untuk _price_grace pasca-arah track agar tidak double-fetch)
+DEXSAVER_PROFILE = "https://api.dexscreener.com/latest/dex/tokens"
+
+
+# ============================ UTIL ============================
+
+def _token_out_from_exact_input_single(data_hex: str):
+    """Layout calldata (hex chars):
+       [0:8]  selector
+       [8:72] offset params (= 0x20)
+       [72:136] tokenIn  (alamat = 40 hex terakhir dari word)
+       [136:200] tokenOut
+    """
+    data = data_hex.lower().replace("0x", "")
+    if len(data) < 200:
+        return None
+    tok_in = data[96:136]     # 40 hex terakhir word-1
+    tok_out = data[160:200]   # alamat dari word-2
+    if len(tok_out) != 40 or int(data[8:72] or "0", 16) != 0x20:
+        # offset bukan 0x20 (layout aneh) → fallback regex universal
+        return None
+    if tok_out in {"0" * 40} or ("0x" + tok_out) in QUOTE_ASSETS:
+        # JUAL: tokenOut = quote → token sebenarnya adalah tokenIn
+        return ("0x" + tok_in) if tok_in not in {"0" * 40} else None
+    return "0x" + tok_out
+
+
+def _words(data_hex: str):
+    """Pecah calldata jadi ABI words 64-hex. Layout: [0:8] selector,
+    lalu tiap word-ke-i = data[8 + i*64 : 8 + (i+1)*64]."""
+    data = data_hex.lower().replace("0x", "")
+    out = [data[:8]]     # word-0 = selector 4-byte
+    i = 8
+    while i + 64 <= len(data):
+        out.append(data[i:i + 64])
+        i += 64
+    return out
+
+
+def _tokens_from_path(data_hex: str) -> list:
+    """Tarik SEMUA kandidat alamat EVM dari calldata ABI-encoded.
+
+    Alamat 20B dalam ABI selalu tampak sebagai 40-hex di sisi KANAN
+    sebuah word 64-hex dengan 24-hex nol di kiri (left-pad 12 byte).
+    Word yang tidak memenuhi pola ini (fee, amount, offset) REJECT.
+    """
+    out, seen = [], set()
+    for word in _words(data_hex):
+        if len(word) != 64:
+            continue
+        head, tail = word[:24], word[24:]
+        if head != "0" * 24 or tail == "0" * 40 or int(tail, 16) <= 0xffff:
+            continue
+        if not all(c in "0123456789abcdef" for c in tail):
+            continue
+        cand = "0x" + tail
+        if cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+    return out
+
+
+def extract_token_out(data_hex: str):
+    """Ekstrak address token TARGET (tokenOut) dari calldata router.
+       Return: alamat 20B 0x-hex huruf kecil, atau None kalau gagal.
+
+       Mendukung:
+         - exactInputSingle: tokenOut langsung dari word kedua params
+         - exactInput / multicall: semua alamat di path dicicipi, dipilih
+           satu yang BUKAN quote asset (WETH/USDG/sentinel).
+    """
+    if not data_hex or len(data_hex) < 74:
+        return None
+    d = data_hex.lower()
+    sel = d[:10]
+    if sel == EXACT_INPUT_SINGLE:
+        tok = _token_out_from_exact_input_single(d)
+        if tok and tok not in QUOTE_ASSETS:
+            return tok
+        # kalau tok None/quote → jatuh ke fallback universal di bawah
+    if sel not in (EXACT_INPUT_SINGLE, EXACT_INPUT, MULTICALL):
+        return None   # selector tidak dikenal → jangan menebak-nebak
+    # fallback universal: semua alamat 20B di data, kecualikan quote
+    cands = [t for t in _tokens_from_path(d)
+             if t.lower() not in QUOTE_ASSETS]
+    return cands[-1].lower() if cands else None
+
+
+def is_buy_call(data_hex: str, from_token=None) -> bool:
+    """Deteksi apakah transaksi router ini mengarah ke BUY token
+       (bukan SELL). Simpel: tokenIn harus quote asset (WETH/USDG).
+       Heuristik 'semua alamat di data: tokenIn = alamat PERTAMA'. """
+    toks = [t.lower() for t in _tokens_from_path(data_hex)]
+    if not toks:
+        return False
+    tok_in = toks[0]
+    return tok_in in QUOTE_ASSETS
+
+
+# ============================ PIPA ============================
+
+def _src() -> dict:
+    """Sumber sinyal untuk insider tracker — memakai sumber sinyal scanner
+       kalau ada; kalau tidak, buat source sintetis src dict."""
+    for s in db.sources(only_enabled=True):
+        if (s.get("name") or "").startswith("Scanner"):
+            return s
+    return {"id": None, "chat_id": 0, "topic_id": 0,
+            "name": "INSIDER_TRACKER", "mcap_max": 50000}
+
+
+async def process_insider_buy(token_ca: str, insider_addr: str = "", notify=None):
+    """Kirim CA koin yang dibeli insider ke pipa bot (sama seperti sinyal
+       scanner): listener.process_ca dengan src yang tepat.
+
+       insider_addr = alamat wallet insider pemicu (bila ada) — di-embed ke
+       caller_id/caller_name posisi trade agar hasil exit (TP/SL) bisa
+       dikembalikan ke skor wallet-nya (db.record_insider_result).
+    """
+    src = _src()
+    print(f"[insider] CA to pipeline: {token_ca}")
+    caller_id = insider_addr.lower() if insider_addr else None
+    caller_name = (f"INSIDER:{insider_addr[:10]}"
+                   if insider_addr else "INSIDER_TRACKER")
+    # Pipa listener.process_ca async — panggil via task supaya tracker tidak
+    # memblokir loop pemantauan blok.
+    asyncio.create_task(listener.process_ca(
+        token_ca, src, caller_id=caller_id, caller_name=caller_name,
+        allow_buy=True))
+
+
+# ============================ SCAN BLOK ============================
+
+async def _inspect_block(w3, block_number: int):
+    """Periksa satu blok: cari tx dari wallet insider ke router swap → pipa.
+
+    Return jumlah sinyal yang dikirim (untuk stats/mode dry-run).
+    """
+    insiders = set(db.get_active_insiders())
+    if not insiders:
+        return 0
+    try:
+        block = await asyncio.to_thread(
+            w3.eth.get_block, block_number, full_transactions=True)
+    except Exception as e:
+        print(f"[tracker] get_block({block_number}) fail: {e}")
+        return 0
+    sent = 0
+    for tx in (block.get("transactions") or []):
+        frm = (tx.get("from") or "").lower()
+        if frm not in insiders:
+            continue
+        to = (tx.get("to") or "").lower()
+        if to != SWAP_ROUTER02:
+            continue
+        data = (tx.get("input") or b"")
+        if hasattr(data, "hex"):
+            data_hex = "0x" + data.hex()
+        else:
+            data_hex = str(data)
+        if len(data_hex) < 12:  # naked transfer / no sel
+            continue
+        sel = data_hex[:10]
+        if sel not in (EXACT_INPUT_SINGLE, EXACT_INPUT, MULTICALL):
+            print(f"[tracker] insider {frm[:12]}… ke router, selector tak dikenal: {sel}")
+            continue
+        if not is_buy_call(data_hex):
+            print(f"[tracker] insider {frm[:12]}… SELL (tokenIn bukan quote) — skip")
+            continue
+        token_out = extract_token_out(data_hex)
+        if not token_out or token_out in QUOTE_ASSETS:
+            print(f"[tracker] insider {frm[:12]}… tokenOut tak terdeteksi — skip")
+            continue
+        # 🔒 Proteksi slippage: bandingkan harga DEX sekarang vs N detik lalu.
+        # Karena tracker REAKTIF (tanpa cache harga), cukup cek priceChange m5
+        # Dexscreener — kalau harga sudah lari tajam, lewati (insider buy di
+        # awal; kita ikut di harga biasanya sudah naik).
+        try:
+            pair = await asyncio.to_thread(dx.best_pair, token_out)
+            pc = (((pair or {}).get("priceChange") or {}).get("m5")) or 0.0
+            if float(pc) > MAX_SLIP_PCT:
+                print(f"[tracker] beta pusing: 'insider buy {token_out[:10]}… "
+                      f"skip — harga sudah +{pc:.1f}% dalam 5m (slippage guard)")
+                continue
+        except Exception:
+            pass  # tebusan data harga gagal → jangan block-trade
+        try:
+            await process_insider_buy(token_out, insider_addr=frm)
+            sent += 1
+        except Exception as e:
+            print(f"[tracker] process_insider_buy fail: {e}")
+    return sent
+
+
+# ============================ LOOP UTAMA ============================
+
+async def tracker_loop():
+    """Loop pemantauan blok — task background bot.py. Matikan pakai setting
+       tracker_on=0 di DB; aktifkan dengan tracker_on=1. Restart-safe: last
+       inspected block disimpan di setting tracker_last_block."""
+    print("[tracker] INSIDER TRACKER loop dimulai")
+    from web3 import Web3
+    from web3.providers import HTTPProvider
+
+    # Probe chain berulang — sampai provider siap (RPC bisa belum siap saat
+    # bot.py baru jalan).
+    await asyncio.sleep(1.0)
+    w3 = None
+    try:
+        w3 = Web3(HTTPProvider(config.RPC_URL))
+        chain_id = await asyncio.to_thread(lambda: w3.eth.chain_id)
+        if chain_id != config.CHAIN_ID:
+            print(f"[tracker] ⚠️ chain_id RPC = {chain_id}, "
+                  f"harusnya {config.CHAIN_ID} (Robinhood Chain)")
+    except Exception as e:
+        print(f"[tracker] RPC belum siap: {e}")
+
+    last_num = int(db.get("tracker_last_block") or 0)
+
+    while True:
+        try:
+            if db.get("tracker_on", str) != "1":
+                await asyncio.sleep(POLL_IDLE)
+                continue
+            if w3 is None:
+                w3 = Web3(HTTPProvider(config.RPC_URL))
+            latest = await asyncio.to_thread(lambda: w3.eth.block_number)
+            if latest <= last_num:
+                await asyncio.sleep(POLL_IDLE)
+                continue
+            if latest - last_num > 50:
+                last_num = latest - 5
+
+            # Pindai blok 'latest' dulu; blok terlewat dikerjakan mundur hingga
+            # grace. Simpan finger setelah sukses agar tidak scan ulang.
+            nums = list(range(last_num + 1, latest + 1))
+            for n in nums:
+                try:
+                    await _inspect_block(w3, n)
+                except Exception as e:
+                    print(f"[tracker] inspect {n} fail: {e}")
+                db.set_("tracker_last_block", n)
+                last_num = n
+                await asyncio.sleep(0.05)   # tolak rate-limit RPC
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[tracker] loop error: {e}")
+            w3 = None
+            await asyncio.sleep(3.0)
+
+
+# ============================ ROTASI OTOMATIS (v16.3) ============================
+
+ROTATE_INTERVAL_SEC = 86400  # 24 jam
+
+
+async def auto_rotation_loop():
+    """Loop background rotasi wallet insider tiap 24 jam (non-blocking):
+    prune wallet boncos/lunglai + daftar insider baru dari koin runner
+    terbaru. On/off via setting tracker_auto_rotate (default \"1\").
+
+    Semua kerjaannya sync/network → asyncio.to_thread supaya loop blok
+    tracker tidak sempat tertahan.
+    """
+    print("[tracker] 🔄 auto rotation loop dimulai (interval 24h)")
+    while True:
+        try:
+            if db.get("tracker_auto_rotate", str) == "1":
+                from tools.rotate_insiders import rotate
+                summary = await asyncio.to_thread(rotate)
+                print(f"[tracker] 🔄 rotasi insider: {summary}")
+        except Exception as e:
+            print(f"[tracker] rotation error: {e}")
+        await asyncio.sleep(ROTATE_INTERVAL_SEC)
