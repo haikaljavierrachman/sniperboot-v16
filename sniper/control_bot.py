@@ -7,7 +7,7 @@ import asyncio
 import re
 import traceback
 from telethon import events, Button, utils
-from . import config, db, engine, agent, dexscreener as dx
+from . import config, db, engine, agent
 
 _pending = {}  # admin_id -> action string ("add_source" | "set:key")
 _trader = None
@@ -159,32 +159,6 @@ def settings_advanced_panel():
     if row:
         buttons.append(row)
     buttons.append([Button.inline("« Kembali ke Settings Utama", b"settings"), Button.inline("« Menu", b"menu")])
-    return "\n".join(lines), buttons
-
-
-def social_filter_panel():
-    cur = db.get("social_filter", str)
-    mn = db.get("social_min_count", str)
-    fc = db.get("social_fail_closed", str)
-    lines = [
-        "🌐 **Filter Sosmed** — pilih mode:\n",
-        f"mode aktif: **{dx.SOCIAL_MODE_LABEL.get(cur, cur)}**",
-        f"min sosmed (mode count): **{mn}**",
-        f"skip kalau kosong: **{'ya' if fc == '1' else 'tidak'}**\n",
-        "_data jejak diambil dari Dexscreener (website/X/Telegram/dll)._",
-    ]
-    def mk(mode, txt):
-        mark = "🟢 " if mode == cur else ""
-        return Button.inline(f"{mark}{txt}", f"setval:social_filter:{mode}")
-    buttons = [
-        [mk("off", "Off"), mk("any", "Any")],
-        [mk("x", "X/Twitter"), mk("tg", "Telegram")],
-        [mk("x_tg", "X + TG"), mk("web", "Website")],
-        [mk("count", f"Min {mn} sosmed")],
-        [Button.inline("🔢 Set min count", b"set:social_min_count"),
-         Button.inline(f"{'🔒' if fc=='1' else '🔓'} Fail-closed", b"togglefc")],
-        [Button.inline("« Settings", b"settings")],
-    ]
     return "\n".join(lines), buttons
 
 
@@ -353,7 +327,7 @@ def register(bot, trader, user_client=None):
             "recent_decisions": db.recent_decisions(8),
             "top_callers": db.top_callers(5),
             "blacklist": db.list_blacklist(),
-            "settings": {k: db.get(k, str) for k in _agent.COACH_KEYS},
+            "settings": {k: db.get(k, str) for k in config.SETTING_DEFAULTS},
             "recap_24h": _engine.build_recap(int(_t.time()) - 86400),
         }
         try:
@@ -493,46 +467,13 @@ async def _route(event, data):
                 await event.respond("Belum cukup pengalaman — butuh ≥5 posisi closed buat melatih insting.")
         except Exception as e:
             await event.respond(f"⚠️ gagal melatih insting: {e}")
-    elif data == "agt:coach":
-        await event.answer("coach menganalisa 24 jam terakhir…")
-        try:
-            await engine.run_coach()
-        except Exception as e:
-            await event.respond(f"⚠️ coach gagal: {e}")
-    elif data == "agt:bl":
-        rows = db.list_blacklist()
-        if not rows:
-            await event.respond("🚫 Blacklist kosong — Mata belum mem-blacklist caller siapapun.")
-        else:
-            lines = ["🚫 **Caller yang di-blacklist Mata** (call mereka auto-skip):\n"]
-            btns = []
-            for r in rows:
-                lines.append(f"• **{r['caller_name'] or r['caller_id']}**\n  _{(r['reason'] or '')[:90]}_")
-                btns.append([Button.inline(f"♻️ Pulihkan {str(r['caller_name'] or r['caller_id'])[:16]}",
-                                           f"blrm:{r['caller_id']}")])
-            btns.append([Button.inline("« Menu", b"menu")])
-            await event.respond("\n".join(lines), buttons=btns)
-    elif data == "agt:blt":
-        db.set_("agent_blacklist", "0" if db.get("agent_blacklist", str) == "1" else "1")
-        on = db.get("agent_blacklist", str) == "1"
-        await event.answer("🚫 blacklist AKTIF" if on else "blacklist NONAKTIF — daftar tetap tersimpan")
-        t, b = agent_panel(); await event.edit(t, buttons=b)
-    elif data.startswith("blrm:"):
-        db.remove_blacklist(int(data[5:]))
-        await event.answer("♻️ dipulihkan — call dia bisa masuk lagi")
     elif data.startswith("applyset:"):
         _, key, val = data.split(":", 2)
-        from . import agent as _agent
-        if key not in _agent.COACH_KEYS:
+        if key not in config.SETTING_DEFAULTS:
             return await event.answer("⛔ key tidak diizinkan", alert=True)
-        lo, hi = _agent.COACH_KEYS[key]
-        try:
-            v = max(lo, min(hi, float(val)))
-        except ValueError:
-            return await event.answer("⛔ nilai tidak valid", alert=True)
-        db.set_(key, v)
-        await event.answer(f"✅ {key} → {v}")
-        await event.respond(f"🎓 Diterapkan: **{key} = {v}**")
+        db.set_(key, val)
+        await event.answer(f"✅ {key} → {val}")
+        await event.respond(f"🎓 Diterapkan: **{key} = {val}**")
     elif data == "wallet":
         t, b = wallet_panel()
         await event.edit(t, buttons=b)
@@ -645,22 +586,11 @@ async def _route(event, data):
             "(publik maupun private), baru bisa dipantau.\n"
             "💡 Gak tau chat_id private-nya? Ketik /id lalu forward 1 pesan dari channel itu."
         )
-    elif data == "set:social_filter":
-        t, b = social_filter_panel()
-        await event.edit(t, buttons=b)
-    elif data == "togglefc":
-        db.set_("social_fail_closed", "0" if db.get("social_fail_closed", str) == "1" else "1")
-        t, b = social_filter_panel()
-        await event.edit(t, buttons=b)
     elif data.startswith("setval:"):
         _, key, val = data.split(":", 2)
-        if key == "social_filter" and db.get("social_filter", str) == val:
-            return await event.answer(f"sudah aktif: {val}")   # hindari edit konten identik
         db.set_(key, val)
         await event.answer(f"✅ {key} → {val}")
-        if key == "social_filter":
-            t, b = social_filter_panel()
-        elif key in MAIN_SETTING_KEYS:
+        if key in MAIN_SETTING_KEYS:
             t, b = settings_panel()
         else:
             t, b = settings_advanced_panel()

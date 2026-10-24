@@ -365,8 +365,6 @@ async def daily_recap_loop():
             continue
         try:
             await _notify(build_recap(int(_t.time()) - 86400))
-            if db.get("agent_coach", str) == "1" and config.LLM_API_KEY:
-                await run_coach()
         except Exception:
             traceback.print_exc()
 
@@ -406,24 +404,3 @@ async def _auto_insting():
                           "\n".join(f"• {t}" for t in out))
     except Exception as e:
         print(f"[auto-insting fail] {e}")
-
-
-async def run_coach():
-    """🎓 Coach: analisa 24 jam + usulan setting (butuh persetujuan via tombol)."""
-    import time as _t
-    from telethon import Button
-    from . import agent, config as cfg
-    recap = build_recap(int(_t.time()) - 86400)
-    settings = {k: db.get(k, str) for k in agent.COACH_KEYS}
-    props = await asyncio.to_thread(agent.coach, recap, settings)
-    if not props:
-        await _notify("🎓 **Coach:** setting sekarang sudah pas menurut data 24 jam terakhir — tidak ada usulan.")
-        return
-    lines = ["🎓 **COACH — usulan penyesuaian** (tap ✅ untuk terapkan):\n"]
-    buttons = []
-    for p in props:
-        cur = db.get(p["key"], str)
-        lines.append(f"• `{p['key']}`: {cur} → **{p['value']}**\n  _{p['why']}_")
-        buttons.append([Button.inline(f"✅ {p['key']} → {p['value']}", f"applyset:{p['key']}:{p['value']}")])
-    buttons.append([Button.inline("❌ Abaikan semua", b"menu")])
-    await _notify("\n".join(lines), buttons=buttons)

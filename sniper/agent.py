@@ -422,41 +422,6 @@ def derive_lessons():
     return out
 
 
-# ---------- 🎓 COACH: review harian yang bisa nyetel settings (dgn persetujuan) ----------
-COACH_KEYS = {
-    "buy_usd": (0.5, 10), "tp1": (0.2, 3.0), "tp2": (0.3, 10.0), "sl": (-0.6, -0.1),
-    "tp1_sell_pct": (0.1, 0.9), "trail_pct": (0.1, 0.5), "min_liq_usd": (100, 10000),
-    "dev_max_pct": (1, 20), "top10_max_pct": (10, 80), "agent_min_conviction": (0, 100),
-}
-
-COACH_SYSTEM = """You are the daily performance coach of hoodsniper, a meme sniper bot.
-Given the last 24h recap, closed-trade breakdown, and current settings, propose AT MOST 3
-concrete setting changes that would improve results. Only these keys are allowed: """ +     ", ".join(COACH_KEYS) + """.
-Respond ONLY a JSON array: [{"key":"...","value":<number>,"why":"<=120 chars bahasa Indonesia"}].
-Empty array [] if current settings look fine. Be conservative — one lever at a time beats
-five. Never propose values outside sane ranges; they get clamped anyway."""
-
-
-def coach(recap_text, current_settings):
-    raw = _call(COACH_SYSTEM, json.dumps({
-        "recap": recap_text,
-        "settings": current_settings,
-        "lessons": [l["text"] for l in db.recent_lessons(5)],
-    }), 800)
-    items = _parse_json(raw)
-    out = []
-    for it in items[:3]:
-        key = str(it.get("key", ""))
-        if key not in COACH_KEYS:
-            continue
-        lo, hi = COACH_KEYS[key]
-        val = _clamp(it.get("value"), lo, hi, None)
-        if val is None:
-            continue
-        out.append({"key": key, "value": round(val, 4), "why": str(it.get("why", ""))[:150]})
-    return out
-
-
 # ---------- 💬 TANYA: Q&A bebas grounded ke data bot ----------
 QA_SYSTEM = """You are hoodsniper's assistant. Answer the admin's question in casual bahasa
 Indonesia, grounded ONLY on the JSON data given (positions, stats, decisions, callers,
