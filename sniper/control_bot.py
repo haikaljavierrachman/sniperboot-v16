@@ -67,9 +67,14 @@ async def positions_panel():
         price = float((pair or {}).get("priceUsd") or 0)
         pnl = (price / p["entry_price_usd"] - 1) * 100 if price > 0 else 0
         emo = "🟢" if pnl >= 0 else "🔴"
-        tp1 = " · TP1✓" if p["tp1_done"] else ""
+        if p.get("tp2_done"):
+            status_tag = " · TP2✓ (🚀 Moonbag)"
+        elif p["tp1_done"]:
+            status_tag = " · TP1✓"
+        else:
+            status_tag = ""
         lines.append(
-            f"{emo} **{p['symbol']}** {pnl:+.1f}%{tp1} _via {p['source_name']}_\n"
+            f"{emo} **{p['symbol']}** {pnl:+.1f}%{status_tag} _via {p['source_name']}_\n"
             f"   entry ${p['entry_price_usd']:.10f} | sisa {p['tokens_left']:,.0f}"
         )
         buttons.append([

@@ -159,7 +159,10 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
 
     import time as _t
     now = int(_t.time())
-    is_close = reason in ("tp2", "sl", "rug", "trail") or (reason == "manual" and (fraction >= 1 or left <= 0))
+    # is_close HANYA bila seluruh token benar-benar habis (full exit) atau
+    # stop-out total. TP1 dan TP2 parsial (skema exit 3 lapis) mengeposkan
+    # posisi tetap OPEN — bukan penutupan — jadi jangan anggap is_close.
+    is_close = (reason in ("sl", "rug", "trail")) or (fraction >= 1.0 or left <= 0)
     if is_close and db.get("agent_auto_insting", str) == "1" and config.LLM_API_KEY:
         st = db.stats()
         total_closed = st["tp2"] + st["sl"] + st["manual"] + st["rug"] + st["trail"] + 1
@@ -206,10 +209,14 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
             # trailing stop moonbag_trail_pct dari puncak, bebas time-stop.
             db.update_position(pos_id, tokens_left=left, tp2_done=1)
             trail_p = float(db.get("moonbag_trail_pct", float) or 0.20) * 100
+            try:
+                hold_m = max(int(float(db.get("max_hold_sec", str) or 420) / 60), 1)
+            except (TypeError, ValueError):
+                hold_m = 7
             text = (f"🎯 **TP2** {tag}\n{nums}\n"
                     f"🚀 **HOLD MOONBAG LAPIS 3** ({left:,.0f} tokens)\n"
                     f"• Dijaga Trailing Stop {trail_p:.0f}% dari puncak\n"
-                    f"• Bebas dari Time-Stop 20m{warn}")
+                    f"• Bebas dari Time-Stop {hold_m}m{warn}")
     elif reason == "sl":
         db.update_position(pos_id, tokens_left=0, status="closed_sl", closed_at=now)
         text = f"🛑 **STOP LOSS** {tag}\n{nums}\nposisi CLOSED{warn}"
