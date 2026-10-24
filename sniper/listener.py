@@ -142,9 +142,20 @@ def topic_id(msg) -> int:
     return 1
 
 
-def register(user_client, trader, notify):
+def register(user_client=None, trader=None, notify=None):
+    """Pasang handler userbot. user_client OPSIONAL:
+
+    - user_client is None → userbot non-aktif (default v16.6): tidak
+      memasang listener apa pun, sinyal 100% dipasok scanner factory
+      on-chain & tracker insider. Tidak boleh raise.
+    - user_client is not None → pasang handler sinyal grup seperti biasa.
+    """
     global _trader, _notify
     _trader, _notify = trader, notify
+    if user_client is None:
+        print("[listener] userbot non-aktif; sinyal 100% dipasok dari "
+              "scanner factory & tracker.")
+        return
 
     @user_client.on(events.NewMessage())
     async def handler(event):

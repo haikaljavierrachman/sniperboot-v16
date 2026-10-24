@@ -83,16 +83,25 @@ async def positions_panel():
 
 def sources_panel():
     rows = db.sources()
-    lines, buttons = ["📡 **Sources (mirror via akun sendiri)**\n"], []
-    for s in rows:
-        st = "✅" if s["enabled"] else "🚫"
-        tp = f" · topic {s['topic_id']}" if s["topic_id"] else " · semua topic"
-        lines.append(f"{st} **{s['name']}** — mcap ≤ ${s['mcap_max']:,.0f}\n   `{s['chat_id']}`{tp}")
-        buttons.append([
-            Button.inline(f"{'🚫 Off' if s['enabled'] else '✅ On'} {s['name'][:14]}", f"srct:{s['id']}"),
-            Button.inline("🗑", f"srcd:{s['id']}"),
-        ])
-    buttons.append([Button.inline("➕ Tambah Source", b"srcadd"), Button.inline("« Menu", b"menu")])
+    lines, buttons = ["📡 **Sources**\n"], []
+    if db.get("userbot_enabled", str) == "1":
+        # Userbot aktif → source mirror grup relevan, tampilkan daftarnya.
+        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v2/v3/v4) + Insider Tracker (55 Wallets)")
+        lines.append("📡 Userbot Telegram: **AKTIF** (mirror sinyal grup di bawah)\n")
+        for s in rows:
+            st = "✅" if s["enabled"] else "🚫"
+            tp = f" · topic {s['topic_id']}" if s["topic_id"] else " · semua topic"
+            lines.append(f"{st} **{s['name']}** — mcap ≤ ${s['mcap_max']:,.0f}\n   `{s['chat_id']}`{tp}")
+            buttons.append([
+                Button.inline(f"{'🚫 Off' if s['enabled'] else '✅ On'} {s['name'][:14]}", f"srct:{s['id']}"),
+                Button.inline("🗑", f"srcd:{s['id']}"),
+            ])
+    else:
+        # Default v16.6: userbot non-aktif — tanpa daftar source mirror.
+        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v2/v3/v4) + Insider Tracker (55 Wallets)")
+        lines.append("🔒 Userbot Telegram: **NON-AKTIF** (Akun personal aman & bebas risiko ban)")
+        lines.append("_Tambah/buka source mirror: aktifkan dulu setting 'userbot_enabled'_\n")
+    buttons.append([Button.inline("« Menu", b"menu")])
     return "\n".join(lines), buttons
 
 

@@ -116,24 +116,40 @@ async def main():
         wallet_cmd(sys.argv[2:])
         return
 
-    user = TelegramClient(config.SESSION_NAME, config.TG_API_ID, config.TG_API_HASH)
-    await user.connect()
-
-    if mode == "login":
-        if await user.is_user_authorized():
-            me = await user.get_me()
-            print(f"Sudah login sebagai {me.first_name}. Session OK.")
-        else:
-            await qr_login(user)
-        await user.disconnect()
-        return
-
-    if not await user.is_user_authorized():
-        raise SystemExit("Belum login. Jalankan dulu: python bot.py login")
-
+    # ---- v16.6 DECOUPLING USERBOT: userbot 100% OPSIONAL ----
+    # Userbot (akun Telegram pribadi) hanya connect bila:
+    #   * setting 'userbot_enabled' = '1' di DB, ATAU
+    #   * mode 'login' (QR login eksplisit dari operator).
+    # Default ('0'): akun personal TIDAK online → bebas risiko ban/flag dari
+    # VPS data-center IP. Sinyal 100% dipasok on-chain (scanner factory
+    # Uniswap v2/v3/v4 + insider tracker + pending retry queue).
+    # Bot kontrol resmi (BotFather, hoodsniper_bot) SELALU jalan — tidak
+    # terpengaruh sama sekali.
     db.init()
     config.validate()
     trader = Trader()
+
+    user = None
+    userbot_enabled = (db.get("userbot_enabled", str) == "1") or mode == "login"
+    if userbot_enabled:
+        user = TelegramClient(config.SESSION_NAME, config.TG_API_ID, config.TG_API_HASH)
+        await user.connect()
+
+        if mode == "login":
+            if await user.is_user_authorized():
+                me = await user.get_me()
+                print(f"Sudah login sebagai {me.first_name}. Session OK.")
+            else:
+                await qr_login(user)
+            await user.disconnect()
+            return
+
+        if not await user.is_user_authorized():
+            print("[warn] Userbot belum login atau sesi expired — lanjut tanpa userbot.")
+            user = None
+    else:
+        print("[userbot] NON-AKTIF (setting userbot_enabled=0) — akun Telegram "
+              "personal aman. Sinyal 100% on-chain: scanner factory + insider tracker.")
 
     bot = TelegramClient("hoodsniper_bot", config.TG_API_ID, config.TG_API_HASH)
     await bot.start(bot_token=config.BOT_TOKEN)
@@ -155,9 +171,12 @@ async def main():
     asyncio.create_task(tracker.auto_rotation_loop())  # v16.3: rotasi insider otomatis 24j
 
     await notify(control_bot.main_menu_text(), buttons=control_bot.main_menu_buttons())
-    print(f"[hoodsniper v16 GABUNGAN] running: listener grup Telegram + scanner "
-          f"chain/pasar dalam satu proses. wallet={trader.addr}")
-    await asyncio.gather(user.run_until_disconnected(), bot.run_until_disconnected())
+    runners = [bot.run_until_disconnected()]   # bot BotFather SELALU runner inti
+    if user is not None:
+        runners.append(user.run_until_disconnected())
+    label = "listener grup + scanner chain/pasar" if user is not None else "scanner on-chain murni (userbot off)"
+    print(f"[hoodsniper v16 GABUNGAN] running: {label}. wallet={trader.addr}")
+    await asyncio.gather(*runners)
 
 
 if __name__ == "__main__":

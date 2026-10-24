@@ -144,6 +144,12 @@ SETTING_DEFAULTS = {
     "goldilocks_max_slippage":    "0.15",
     "goldilocks_tp1":             "0.35",
     "goldilocks_tp2":             "0.80",
+    # ---- 📡 Userbot Telegram (alpha groups listener) — 100% OPSIONAL ----
+    # Default '0' = NONAKTIF: akun pribadi tidak online di VPS (bebas risiko
+    # ban/flag), sinyal 100% dipasok on-chain (factory & insider tracker).
+    # '1' = aktif kembali mirror sinyal grup via akun Telegram sendiri.
+    # Mode `python bot.py login` selalu connect (untuk QR login apapun).
+    "userbot_enabled": "0",
 }
 
 SETTING_LABELS = {
@@ -198,6 +204,7 @@ SETTING_LABELS = {
     "goldilocks_max_slippage":    "⚡ Goldilocks: maks slippage quote",
     "goldilocks_tp1":             "⚡ Goldilocks: TP1 (0.35 = +35%)",
     "goldilocks_tp2":             "⚡ Goldilocks: TP2 (0.80 = +80%)",
+    "userbot_enabled":       "📡 Userbot Telegram alpha groups (1/0, default 0=off)",
 }
 
 def validate():
