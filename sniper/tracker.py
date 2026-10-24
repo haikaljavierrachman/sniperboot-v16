@@ -315,20 +315,76 @@ async def tracker_loop():
             await asyncio.sleep(3.0)
 
 
-# ============================ ROTASI OTOMATIS (v16.3) ============================
+# ---------------------------------------------------------------
+# 5. AUTO-SCAN AWAL DI KONDISI INSTALASI BARU (tabel insider kosong)
+# ---------------------------------------------------------------
 
 ROTATE_INTERVAL_SEC = 21600  # 6 jam — percepat rotasi insider: memcoin exit liquiditas cepat
 
 
-async def auto_rotation_loop():
+def bind_notify(notify):
+    """Ikat callback Telegram (async fn(text)) dari bot.py supaya scan awal
+       instalasi baru bisa melaporkan ringkasannya ke admin via Telegram."""
+    global _notify_cb
+    _notify_cb = notify
+
+
+_notify_cb = None
+
+
+async def _notify_async(text: str):
+    cb = _notify_cb
+    if cb is None:
+        return
+    try:
+        await cb(text)
+    except Exception as e:
+        print(f"[tracker] notify fail: {e}")
+
+
+async def _initial_scan_if_empty():
+    """Panggil sekali di awal loop: kalau tabel insider kosong (instalasi
+       baru / git clone pertama), langsung scan koin runner on-chain dan
+       recruit insider awal — tracker tidak jalan upgrade sendirian."""
+    active_count = len(db.get_active_insiders())
+    if active_count > 0:
+        return
+    print("[tracker] 🕵️ Instalasi baru terdeteksi (0 insider aktif) — "
+          "memicu scan awal runner on-chain sekarang...")
+    await _notify_async(
+        "🕵️ Instalasi baru terdeteksi (0 insider aktif) — "
+        "scan awal runner on-chain dimulai...")
+    try:
+        from tools.rotate_insiders import rotate
+        summary = await asyncio.to_thread(rotate, 15)
+    except Exception as e:
+        print(f"[tracker] scan awal gagal: {e}")
+        await _notify_async(f"[tracker] scan awal gagal: {e}")
+        return
+    added = summary.get("added", 0)
+    total = summary.get("total_active", 0)
+    print(f"[tracker] 🔄 Scan awal selesai: +{added} wallet baru dijaring "
+          f"(total aktif: {total})")
+    await _notify_async(
+        f"🔄 Scan awal selesai: +{added} wallet baru dijaring "
+        f"(total aktif: {total})")
+
+
+async def auto_rotation_loop(notify=None):
     """Loop background rotasi wallet insider tiap 6 jam (non-blocking):
     prune wallet boncos/lunglai + daftar insider baru dari koin runner
-    terbaru. On/off via setting tracker_auto_rotate (default \"1\").
+    terbaru. On/off via setting tracker_auto_rotate (default "1").
 
     Semua kerjaannya sync/network → asyncio.to_thread supaya loop blok
     tracker tidak sempat tertahan.
     """
+    if notify is not None:
+        bind_notify(notify)
     print("[tracker] 🔄 auto rotation loop dimulai (interval 6h)")
+    try:
+        await _initial_scan_if_empty()
+    except Exception as e:
+        print(f"[tracker] initial scan error: {e}")
     while True:
         try:
             if db.get("tracker_auto_rotate", str) == "1":

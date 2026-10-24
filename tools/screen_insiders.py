@@ -51,30 +51,101 @@ def _get(url, *a, **kw):
 
 # ---------- 1. AMBIL KOIN YANG TERBANG ----------
 
-def fetch_gainers(limit=10) -> list[str]:
-    """CA koin Robinhood Chain yang geaak trade (search Robinhood di Dexscreener)
-       Diurutkan menurun per priceChange h24 → koin "sudah jalan"."""
-    try:
-        r = _get(DEX_SEARCH)
-        pairs = (r.json() or {}).get("pairs") or []
-    except Exception as e:
-        print(f"⚠️ Dexscreener search gagal: {e}")
-        return []
-    out, seen = [], set()
-    for p in pairs:
+DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+DEX_BOOSTS = "https://api.dexscreener.com/token-boosts/latest/v1"
+DEX_SEARCH_MULTI = "https://api.dexscreener.com/latest/dex/search?q={q}"
+
+
+def _rh_cas_from_pairs(pairs: list) -> list[tuple[float, float, str]]:
+    """CA Robinhood Chain dari daftar pair Dexscreener.
+       Return list (volume24, priceChange24, ca)."""
+    out = []
+    for p in pairs or []:
         if (p.get("chainId") or "").lower() != config.DEX_CHAIN_MATCH.lower():
             continue
-        ca = (p.get("baseToken") or {}).get("address") or ""
-        if not ca.startswith("0x") or ca.lower() in seen:
+        ca = ((p.get("baseToken") or {}).get("address") or "").lower()
+        if not ca.startswith("0x"):
             continue
-        seen.add(ca.lower())
-        # skor momentum: h24 sekarang berjalan signifikan & tdk di bawah
-        chg = float((p.get("priceChange") or {}).get("h24") or 0)
-        if chg < 50.0:           # uang koin "biasa" — topik screen e early additions
+        try:
+            vol = float(((p.get("volume") or {}).get("h24")) or 0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        try:
+            chg = float(((p.get("priceChange") or {}).get("h24")) or 0)
+        except (TypeError, ValueError):
+            chg = 0.0
+        out.append((vol, chg, ca))
+    return out
+
+
+def _dexscreener_profiles_cas() -> list[str]:
+    """CA dari token-profiles & token-boosts (filter chainId robinhood)."""
+    cas = []
+    for url in (DEX_PROFILES, DEX_BOOSTS):
+        try:
+            r = _get(url)
+            items = r.json() or []
+        except Exception as e:
+            print(f"⚠️ Dexscreener {url.rsplit('/', 1)[-1]} gagal: {e}")
             continue
-        out.append((chg, ca))
-    out.sort(reverse=True)
-    return [ca for _, ca in out[:limit]]
+        for it in items if isinstance(items, list) else []:
+            if (it.get("chainId") or "").lower() != config.DEX_CHAIN_MATCH.lower():
+                continue
+            ca = (it.get("tokenAddress") or "").lower()
+            if ca.startswith("0x"):
+                cas.append(ca)
+    return cas
+
+
+def fetch_gainers(limit=10) -> list[str]:
+    """CA koin Robinhood Chain yang geaak trade — multi sumber:
+
+      a. Dexscreener token-profiles + token-boosts (chainId=robinhood)
+      b. Search multi-query: v4, robinhood, ETH, YMB (chainId=robinhood)
+      c. Posisi sukses lokal (closed_tp1 / closed_tp2) dari DB sniper
+      d. Dedup CA + urutkan berdasarkan volume/priceChange h24 menurun
+
+    Jaringan gabung merge → 15-30 runner nyata walau search `robinhood`
+    murni kosong.
+    """
+    cad: dict[str, tuple[float, float]] = {}   # ca → (vol24, chg24)
+
+    # (a) profiles + boosts — endpoint token-list, tanpa metric harga
+    for ca in _dexscreener_profiles_cas():
+        if ca not in cad:
+            cad[ca] = (0.0, 0.0)           # metric akan diisi dari query (b)
+
+    # (b) search multi-query — metric volume/priceChange nyata
+    for q in ("v4", "robinhood", "ETH", "YMB"):
+        try:
+            r = _get(DEX_SEARCH_MULTI.format(q=q))
+            pairs = (r.json() or {}).get("pairs") or []
+        except Exception as e:
+            print(f"⚠️ Dexscreener search '{q}' gagal: {e}")
+            continue
+        for vol, chg, ca in _rh_cas_from_pairs(pairs):
+            vol0, chg0 = cad.get(ca, (0.0, 0.0))
+            cad[ca] = (max(vol, vol0), max(chg, chg0))
+
+    # (c) posisi sukses lokal — CA yang pernah close TP1/TP2 di DB kita
+    try:
+        db.init()
+        with db._lock, db._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT ca FROM positions "
+                "WHERE status IN ('closed_tp1','closed_tp2')").fetchall()
+        for (ca,) in rows:
+            ca = (ca or "").lower()
+            if ca.startswith("0x"):
+                vol0, chg0 = cad.get(ca, (0.0, 0.0))
+                cad.setdefault(ca, (vol0, chg0))
+    except Exception as e:
+        print(f"⚠️ DB closed-positions gagal: {e}")
+
+    # (d) skor = volume24 + priceChange24 — dedup justru di dict di atas.
+    scored = sorted(cad.items(), key=lambda kv: kv[1][0] + kv[1][1],
+                    reverse=True)
+    return [ca for ca, _ in scored[:limit]]
 
 
 def fetch_early_buyers(ca: str, max_buyers=50) -> list[dict]:

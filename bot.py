@@ -168,7 +168,7 @@ async def main():
     asyncio.create_task(engine.daily_recap_loop())
     asyncio.create_task(scanner.scanner_loop())  # v16: scanner = sumber sinyal kedua (gabungan)
     asyncio.create_task(tracker.tracker_loop())  # v16.1: tracker insider copy-trade (sumber sinyal ketiga)
-    asyncio.create_task(tracker.auto_rotation_loop())  # v16.3: rotasi insider otomatis 24j
+    asyncio.create_task(tracker.auto_rotation_loop(notify=notify))  # v16.3: rotasi insider otomatis 24j + scan awal instalasi baru
 
     await notify(control_bot.main_menu_text(), buttons=control_bot.main_menu_buttons())
     runners = [bot.run_until_disconnected()]   # bot BotFather SELALU runner inti
