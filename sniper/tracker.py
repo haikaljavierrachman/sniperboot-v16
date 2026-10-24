@@ -62,12 +62,9 @@ POLL_IDLE = 0.5     # dtk kalau tidak ada blok baru (Robinhood Chain ~10 blok/dt
 # data dexscreener adalah HEX TELANJANG (tanpa "0x"), jadi regex cari
 # run hex ≥40 karakter lalu ambil 40 karakter pertama dari tiap run
 # (alamat EVM 20B selalu muncul sebagai 40 hex di kolom kiri word).
-_HEX_RUN_RE = re.compile(r"[0-9a-fA-F]{40,}")
-_HEX40_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 # Dexscreener / Blockscout base URLs (dipakai tersier di screen_insiders, di sini
 # hanya untuk _price_grace pasca-arah track agar tidak double-fetch)
-DEXSAVER_PROFILE = "https://api.dexscreener.com/latest/dex/tokens"
 
 
 # ============================ UTIL ============================

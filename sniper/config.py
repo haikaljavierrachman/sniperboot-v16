@@ -97,7 +97,6 @@ SETTING_DEFAULTS = {
     "agent_min_conviction": "55",
     "agent_blacklist": "1",
     "agent_auto_insting": "1",
-    "agent_coach":    "1",
     # ---- 🔭 Scanner (v16 gabungan): sumber sinyal KEDUA di samping listener grup.
     # Semantik mode menyusul v15: eksekusi diatur mode global (agent_dry_run
     # default 1), BUKAN kunci keras seperti prototipe v14. ----
@@ -122,8 +121,6 @@ SETTING_DEFAULTS = {
     # ---- 🕵️ Insider Tracker (v16.1): sumber sinyal KETIGA (copy-trade smart money) ----
     "tracker_on":            "0",
     "tracker_last_block":    "0",
-    "tracker_poll_sec":      "5",
-    "tracker_max_slip_pct":  "5.0",
     # ---- 🔄 Rotasi wallet insider (v16.3): prune boncos + rekrut dari runner ----
     "tracker_auto_rotate":   "1",
     # ---- 🧪 Dompet kas virtual (paper trading mode latihan) ----

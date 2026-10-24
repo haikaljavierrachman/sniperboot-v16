@@ -633,8 +633,3 @@ def list_insiders(only_enabled=False):
         return [dict(r) for r in c.execute(q)]
 
 
-def del_insider(address):
-    address = str(address).strip().lower()
-    with _lock, _conn() as c:
-        _init_insider_wallets(c)
-        c.execute("DELETE FROM insider_wallets WHERE address=?", (address,))

@@ -44,10 +44,6 @@ WETH9 = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 
 # ===================== Selector & topic (dihitung & diverifikasi by Atlas) ==
 INITIALIZE_TOPIC0 = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
-SEL_QUOTE_EXACT_INPUT_SINGLE = "0xaa9d21cb"
-SEL_GET_LIQUIDITY = "0xfa6793d5"
-SEL_GET_SLOT0 = "0xc815641c"
-SEL_EXECUTE = "0x3593564c"    # execute(bytes,bytes[],uint256)
 
 # Custom error selectors (dari bukti probe langsung ke V4Quoter):
 ERR_QUOTE_SWAP = "0xecbd9804"           # QuoteSwap(uint256) = SUKSES
@@ -316,20 +312,6 @@ def liquidity(pool_id, w3):
             Web3.to_checksum_address(STATE_VIEW), abi=STATE_VIEW_ABI)
         return int(pv.functions.getLiquidity(
             _pool_id_bytes32(pool_id)).call())
-    except Exception:
-        return None
-
-
-def slot0(pool_id, w3):
-    """StateView.getSlot0(poolId) → (sqrtPriceX96, tick, protocolFee, lpFee)
-    atau None kalau w3 hilang / pool_id salah / RPC error."""
-    if w3 is None or pool_id is None:
-        return None
-    try:
-        pv = w3.eth.contract(
-            Web3.to_checksum_address(STATE_VIEW), abi=STATE_VIEW_ABI)
-        r = pv.functions.getSlot0(_pool_id_bytes32(pool_id)).call()
-        return (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
     except Exception:
         return None
 
@@ -605,13 +587,6 @@ def eth_abi_encode(vals, types=None):
             else:
                 types.append("uint256")
     return encode(types, vals)
-
-
-def eth_abi_encode_bytes(b):
-    """RFC UniversalRouter parameter inputs[0] adalah raw bytes (tidak
-    di-wrap abi-encode panjang) — return b'tanpa diubah' biar programmer
-    future tidak salah baca panjang."""
-    return bytes(b)
 
 
 def eth_abi_encode_exact_in(exact_in):
