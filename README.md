@@ -1,84 +1,110 @@
 # Hoodsniper v16.6 🤖⚡
 
-Autonomous On-Chain Sniper & Multi-DEX Trading Bot untuk **Robinhood Chain (Chain ID `4663`)**. Dilengkapi arsitektur **Dual-Engine Entry (MATA AI $\leftrightarrow$ FAST-PATH 0s Math)**, **Zero-Gas On-Chain Quoter**, **55 Insider Smart Money Copy-Tracker**, serta **Panel Kontrol Telegram Resmi (BotFather)** tanpa memerlukan userbot akun personal.
+Autonomous On-Chain Sniper & Multi-DEX Trading Bot untuk **Robinhood Chain (Chain ID `4663`)**. Dirancang khusus untuk pertarungan blok sequencer berkecepatan tinggi ($\sim 0.15 - 0.20$ detik/blok), bot ini mengusung **Duopoli DEX (Uniswap v4 + v2)**, **Arsitektur Dual-Engine Entry (FAST-PATH 0s Math $\leftrightarrow$ MATA LLM)**, **On-Chain Spot Price Anchor**, **Sinkronisasi PnL On-Chain Sell Quoter**, serta **55 Insider Smart Money Copy-Tracker** dengan **Panel Kontrol Telegram Resmi (BotFather)** murni 100% on-chain.
 
 ---
 
-## ⚡ Cara Kerja Bot (Alur Pipeline Eksekusi)
+## ⚡ Arsitektur Pipeline Eksekusi (High-Speed Engine)
 
 ```
 [Sumber Sinyal Murni On-Chain]
-  ├── Factory Events (Uniswap v2, v3, v4 via eth_getLogs)
-  ├── Smart Money Tracker (55 Insider Wallets Copy-Trade)
-  └── Pending Pool Retry Queue (Anti-Stale Index Dexscreener)
+  ├── Factory Events Duopoli (Uniswap v4 & Uniswap v2 via eth_getLogs)
+  ├── Smart Money Copy-Tracker (55 Insider Wallets, Rotasi 6 Jam, Pruning 3 Hari)
+  └── Pending Pool Retry Queue (Penjaga Gap Indeks Dexscreener)
           │
           ▼
-[Lapisan 1: Pagar Keras Pre-Buy (0.05s)]
-  ├── Filter Market Cap: $7.000 – $45.000 (Anti-Pucuk)
-  ├── Filter Likuiditas: Min $2.000 – $4.000 (Rasio Liq/Mcap Sehat)
+[Lapisan 1: Pagar Keras Pre-Screening (0.02s)]
+  ├── Duopoli Guard: Pemblokiran total Uniswap v3 (Tick-Trap 100% Rug) & Pons Launchpad
+  ├── Filter Umur Pool: 10 detik s/d 300 detik (5 menit, melompati MEV dev blok 1–5)
+  ├── Filter Likuiditas: Min $4.000 (Rasio Liq/Mcap Sehat ≥ 35%)
   ├── Audit Bytecode EVM: Deteksi fungsi mint(), blacklist(), setFee() tersembunyi
-  └── Audit Holder: Dev max 3% – 5%, Top 10 non-pool max 25% – 40% (via Blockscout)
+  └── Audit Holder: Dev max 4%, Top 10 non-pool max 30% (Fail-closed via Blockscout)
           │
           ▼
 [Lapisan 2: Dual-Engine Entry Gate (Pilih via Saklar Telegram)]
-  ├── 👁 MODE MATA (LLM) :
-  │     Evaluasi momentum pasar, volume flow, chart curve, & dynamic sizing (5–7s).
-  └── ⚡ MODE FAST-PATH (Goldilocks Defensive) :
-        Evaluasi murni matematika & umur pool (30s–180s), rasio liq/mcap ≥ 35% (0.2s, 0 detik LLM).
+  ├── ⚡ MODE FAST-PATH (Goldilocks Defensive - Default & Rekomendasi):
+  │     Evaluasi murni matematika/bytecode dalam 0.01 detik (0 detik LLM).
+  │     Langsung menyambar blok sequencer bersama sniper profesional tanpa buang 100 blok.
+  └── 👁 MODE MATA (LLM Opsional):
+        Evaluasi momentum narasi & konfirmasi conviction via AI (10–15s).
           │
           ▼
-[Lapisan 3: Zero-Gas On-Chain Quoter (Detik Eksekusi)]
-  ├── Simulasi eth_call langsung ke Sequencer (Tanpa Gas)
-  │     ├── Uniswap v4 : UniversalRouter + V4Quoter.quoteExactInputSingle + StateView
-  │     ├── Uniswap v3 : SwapRouter02
-  │     └── Uniswap v2 : Router2.getAmountsOut
-  ├── Pagar Slippage: Tolak jika harga lari melebihi batas toleransi
-  └── Pagar Mcap Riil: Tolak jika Mcap On-Chain > $45.000 (Terkunci oleh sniper lain)
+[Lapisan 3: On-Chain Spot Price Anchor & Zero-Gas Quoter (Detik Eksekusi)]
+  ├── Spot Price Anchor: Probe harga spot riil dari pool (min_out = 0), bebas lag Dexscreener
+  ├── Circulating Supply Guard: Pengurangan token burned (0x...dEaD & 0x...000) untuk hitungan Mcap presisi
+  ├── Pagar Market Cap On-Chain: Tolak masuk jika Mcap On-Chain > $35.000 (Anti-Pucuk)
+  └── Toleransi Slippage 2 Lapis:
+        ├── Lapis 1 Screener: Max 25% (mencegah false reject koin yang berfluktuasi wajar)
+        └── Lapis 2 Swap On-Chain: Toleransi AMM 40% (tembus blok sequencer tanpa revert)
           │
           ▼
 [Lapisan 4: Eksekusi Swap & Posisi]
-  ├── Live Mode     : Kirim Raw Transaction (UniversalRouter / SwapRouter)
-  └── Latihan Mode  : Virtual Paper Trading presisi tinggi (Potong gas $0.12 + slip 1%)
+  ├── Live Mode     : Kirim Raw Transaction ke Uniswap v4 UniversalRouter / v2 Router
+  └── Latihan Mode  : Virtual Paper Trading presisi tinggi (Modal awal $20, Gas $0.12, Spread 1%)
           │
           ▼
-[Lapisan 5: Mesin Penjaga Posisi (Loop Matematika Tiap 20s)]
-  ├── TP1 Scale-Out : Jual 50% di +35% / +50% (Modal pokok kembali aman ke kas)
-  ├── Breakeven SL  : Sisa moonbag terkunci minimal di harga modal (0% risk)
-  ├── TP2 Target    : Kunci profit bersih di +80% / +100%
-  ├── Trailing ATH  : Kunci cuan jika grafik turun -15% dari titik puncak (ATH)
-  ├── Hard Rug Exit : Auto-sell seketika jika likuiditas pool dicabut dev
-  └── TANGAN (AI)   : Review berkala tiap 10 menit untuk cut-loss posisi basi
+[Lapisan 5: Mesin Penjaga Posisi & Sinkronisasi PnL On-Chain (Engine Loop 5s)]
+  ├── On-Chain PnL Sync : Evaluasi PnL mengacu langsung pada output quote_sell_eth (Bebas lag layar)
+  ├── TP1 Scale-Out     : Jual 50% di +35% / +50% (Modal pokok langsung kembali aman ke dompet/kas)
+  ├── TP2 Target        : Kunci profit puncak di +80% / +100% (TETAP AKTIF)
+  ├── Breakeven & Trail : Kunci profit jika grafik anjlok -15% dari titik puncak (ATH)
+  ├── Hard Rug Exit     : Emergency exit seketika jika StateView mendeteksi likuiditas pool dicabut
+  └── Time-Stop Lifespan: Auto-close posisi setelah 20 menit (1200s) jika pergerakan stagnan
 ```
 
 ---
 
-## 🛠 Fitur Utama
+## 🛠 Perombakan Besar & Keunggulan Rekayasa Sistem (v16.6)
 
-- **Dual-Engine Entry Switch**:
-  - Pindah mode instan lewat 1 tombol di Telegram: `👁 MATA (LLM)` untuk analisis mendalam vs `⚡ FAST-PATH (Math)` untuk sambaran kilat (0.2 detik).
-- **100% On-Chain & Aman dari Risiko Banned Telegram**:
-  - Telethon userbot akun pribadi didekopel penuh (`userbot_enabled: 0`).
-  - Bot berjalan murni menggunakan bot resmi Telegram (`@BotFather`). Akun personal Anda bebas risiko ban atau spam-block.
-- **Dukungan Multi-DEX Penuh**:
-  - **Uniswap v4**: UniversalRouter (`0x8876...0904`), StateView (`0x0284...55F2`), V4Quoter (`0xdF8B...1867`).
-  - **Uniswap v3**: SwapRouter02 & Tick Fee decoding.
-  - **Uniswap v2**: Router2 getAmountsOut & Fee-on-transfer support.
-- **Konkurensi Ringan & Hemat Sumber Daya**:
-  - `Batch 2` + `asyncio.Semaphore(2)` memangkas antrean screening.
-  - Pemakaian RAM VPS stabil di $\le$ 110 MB (cocok untuk VPS RAM 3.5 GB tanpa GPU).
-- **Realistic Virtual Paper Trading Simulator**:
-  - Mensimulasikan kondisi riil blockchain: gas sequencer L2 ($0.12 per swap), spread eksekusi DEX 1%, dan harga live On-Chain Quoter.
-- **Mobile Telegram Control UI**:
-  - Atur modal, TP/SL, slippage, refresh data, switch latihan/live, pantau grafik posisi, dan intervensi manual (Sell 50% / Sell ALL) langsung dari Telegram.
+### 1. Duopoli DEX (Uniswap v4 + Uniswap v2)
+* **Penghapusan Uniswap v3 & Pons Launchpad**: Data historis menunjukkan Uniswap v3 menjadi sarang *tick-trap* sempit yang memicu 100% transaksi rug, sementara Pons memiliki volume pasar insignifikan (<2%).
+* **Efisiensi RPC**: Scanner hanya mendengarkan `factory-v4` (UniversalRouter) dan `factory-v2`, memangkas beban kuota RPC `eth_getLogs` hingga 50%.
+
+### 2. On-Chain Spot Price Anchor (Bebas Lag Dexscreener)
+* Dexscreener memiliki *cache delay* 20–40 detik. Koin runner yang melonjak dari Mcap $8k ke $15k sebelumnya ditolak dengan alasan `slippage_besar` palsu karena membandingkan harga on-chain dengan harga layar lama.
+* Bot kini meng-anchor harga menggunakan **kuotasi spot on-chain langsung dari pool**.
+* Selama $\text{Mcap On-Chain} \le \$35.000$, bot langsung hajar masuk tanpa terhadang slippage palsu.
+
+### 3. Deteksi Burned Supply (Circulating Market Cap Presisi)
+* Meme coin di L2 Robinhood mayoritas membakar $\sim 77.2\%$ dari 1 Miliar token awal ke alamat `0x000000000000000000000000000000000000dEaD`.
+* Bot membaca saldo alamat bakar secara on-chain dan mengurangkannya dari total supply:
+  $$\text{Circulating Supply} = \text{Total Supply} - \text{Burned Tokens}$$
+* Menghilangkan kesalahan tuduhan `mcap_onchain_pucuk` dan menyelaraskan perhitungan market cap bot 100% presisi dengan Dexscreener.
+
+### 4. Sinkronisasi PnL On-Chain Sell Quoter (`engine.py`)
+* Pemantauan posisi (TP1, TP2, Stop Loss, Trailing Stop) dan realisasi exit simulasi kini menggunakan **`quote_sell_eth`** langsung dari blockchain.
+* Mengeliminasi bug desinkronisasi di mana posisi yang baru dibeli di on-chain langsung terkena Stop Loss palsu di detik pertama akibat grafik layar Dexscreener yang belum naik.
+
+### 5. Aturan Siklus Hidup Meme Coin & Smart Money Tracker
+* **Time-Stop 20 Menit (`closed_timeout`)**: Membebaskan modal trading jika token tidak mencapai target dalam 20 menit.
+* **Auto-Blacklist Insider**: Wallet yang memicu 2x Stop Loss berturut-turut langsung dinonaktifkan (`enabled = 0`).
+* **Pruning Pasif 3 Hari**: Wallet inaktif > 72 jam dengan kemenangan $< 2$ koin dipangkas otomatis setiap rotasi 6 jam.
+
+### 6. Proteksi Akumulasi Saldo Paper Trading
+* Default modal uji coba dirasionalisasi menjadi **$20.00** (sesuai standar bankroll disiplin).
+* Skrip `tools/reset_paper_wallet.py` dirombak total dengan **dialog konfirmasi interaktif `[y/N]`** dan opsi argumen nominal fleksibel, mencegah reset tidak disengaja terhadap akumulasi profit riil.
 
 ---
 
-## 🚀 Setup Cepat
+## 📱 Kontrol Telegram BotFather (100% Murni On-Chain)
 
-### 1. Prasyarat
-- Python 3.11+
-- Bot Telegram (Token dari `@BotFather` & Admin ID dari `@userinfobot`)
-- RPC Robinhood Chain (atau EVM L2 target)
+Bot berjalan sepenuhnya menggunakan API BotFather resmi tanpa ketergantungan Telethon userbot akun personal (`userbot_enabled: 0`), menjamin akun Telegram personal Anda bebas dari risiko banned:
+
+* **Panel Utama**: Status kas virtual, saldo ETH wallet burner, posisi terbuka, dan ringkasan PnL.
+* **Saklar 1-Klik**:
+  * Mode Entry: `⚡ FAST-PATH` (Math 0s) $\leftrightarrow$ `👁 MATA` (LLM).
+  * Mode Lingkungan: `🧪 Latihan (Paper Trading)` $\leftrightarrow$ `🔴 Live On-Chain`.
+* **Intervensi Posisi**: Tombol aksi darurat langsung di notifikasi (`Jual 50%` / `Jual 100%`).
+
+---
+
+## 🚀 Setup & Menjalankan
+
+### 1. Prasyarat Sistem
+* Linux / macOS (Diuji pada Ubuntu 22.04 LTS, RAM $\ge$ 3.5 GB, Zero-Inbound Ports)
+* Python 3.11+
+* Kredensial Bot Telegram dari `@BotFather` & Chat ID Admin dari `@userinfobot`
+* RPC Node Robinhood Chain (EVM Chain ID `4663`)
 
 ### 2. Instalasi
 ```bash
@@ -86,21 +112,31 @@ git clone git@github.com:irf4an/sniperboot-v16.git
 cd sniperboot-v16
 pip install -r requirements.txt
 cp .env.example .env
+chmod 600 .env
 ```
 
-### 3. Konfigurasi (.env)
-Isi variabel pada `.env` (private key burner, token Telegram, admin ID, dan URL LLM jika mode AI aktif).
+### 3. Konfigurasi (`.env`)
+Isi variabel lingkungan yang diperlukan:
+* `TELEGRAM_BOT_TOKEN`: Token bot dari BotFather
+* `TELEGRAM_ADMIN_ID`: ID akun Telegram Anda
+* `RPC_URL`: Endpoint RPC Robinhood Chain
+* `WALLET_PRIVATE_KEY`: Private key wallet burner terdedikasi
 
-### 4. Menjalankan
+### 4. Eksekusi & Manajemen Proses
 ```bash
-# Jalankan langsung (Plug & Play, tanpa perlu scan QR akun Telegram)
-python3 bot.py
+# Uji seluruh test suite regresi (18 file tes wajib lulus 100%)
+bash tests/run_all.sh
 
-# Atau via PM2 (rekomendasi VPS)
+# Menjalankan via PM2 (rekomendasi VPS)
 pm2 start ecosystem.config.js
+
+# Memantau log real-time
+pm2 logs hoodsniper-v16
 ```
 
 ---
 
-## ⚖️ Lisensi & Keamanan
-Khusus untuk riset dan otomatisasi pada aset terotorisasi. Selalu gunakan **burner wallet terpisah** dengan saldo terbatas.
+## 🛡 Kebijakan Keamanan & Manajemen Resiko
+1. **Zero Inbound Port**: Jangan membuka port server ke publik; akses dashboard/panel remote hanya melalui VPN/Tailscale atau Cloudflare Tunnel.
+2. **Burner Wallet Only**: Dilarang keras menggunakan private key dompet utama. Selalu gunakan dompet burner dengan saldo operasional minimal (\$20 – \$30).
+3. **Fail-Closed Safety**: Jika audit holder Blockscout atau StateView RPC mengalami gangguan/timeout, sistem secara otomatis menolak token (`fail-closed`).
