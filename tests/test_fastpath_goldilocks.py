@@ -216,25 +216,69 @@ check("honeypot → skip dev_terlalu_besar (gate safety)",
 
 
 # =====================================================================
-print("\n[5] slippage quoter > 25% → skip (via _fastpath_gate)")
+print("\n[5] ON-CHAIN SPOT PRICE ANCHOR — guard mcap, bukan slippage layar")
 listener.safety.check = lambda tr, ca, p: (True, "ok")
 listener.safety.dev_pct = lambda tr, ca: 0.0
 listener.safety.top_holders_pct = lambda tr, ca, ex, n=10: 10.0
 
-# harga layar 0.001 / native 0.0005 → eth_price 2 → buy $5 = 2.5 ETH →
-# expected 5000 token; min_out 25% = 3750 token. quote 3000 < 3750 → slip.
-class QuoterSlip(FakeTrader):
+# Kasus runner: Dexscreener bilang $8k (layar basi), tapi on-chain harga
+# sudah $15k. Quote spot min_out=0 dikembalikan REALISTIS (~2000 token dari
+# $5 → entry $0.0025 → mcap on-chain $50.000 dengan supply 25jt... di bawah
+# buat supply 6jt → mcap $15.000 ≤ $35k → LOLOS, TANPA 'slippage_besar'.
+class QuoterRunner(FakeTrader):
+    def __init__(self, supply=6_000_000, amt=2000):
+        self.supply = supply
+        self.amt = amt
+
     def erc20(self, addr_):
-        return Dec18ERC20(addr_)
+        tr = self
+        class E:
+            class functions:
+                @staticmethod
+                def decimals():
+                    class F:
+                        def call(self):
+                            return 18
+                    return F()
+
+                @staticmethod
+                def totalSupply():
+                    class G:
+                        def call(self):
+                            return tr.supply * 10**18
+                    return G()
+        return E()
 
     def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
-        return False, 0, "slippage_exceeded_onchain"
+        # min_out DIBIARKAN 0 — quoter benci min_out dari harga layar basi
+        assert min_out == 0, f"spot probe harus min_out=0, dapat {min_out}"
+        return True, self.amt * 10**18, ""
 
 
-listener._trader = QuoterSlip()
+listener._trader = QuoterRunner()
+ok, tag, metr = asyncio.run(_fastpath_gate(CA, p_ok))
+check("runner $8k layar → $15k on-chain (<= 35k) → LOLOS tanpa slippage_besar",
+      ok and tag == "" and abs(metr.get("mcap_onchain", 0) - 15000.0) < 0.01,
+      f"tag={tag} mcap_onchain={metr.get('mcap_onchain')}")
+
+# Kasus pucuk on-chain: supply 200jt → 0.0025 × 200jt = $500.000 > 45k/35k
+listener._trader = QuoterRunner(supply=200_000_000)
 ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
-check("quote < ambang 25% → skip slippage_besar",
-      not ok and tag == "slippage_besar", tag)
+check("mcap on-chain $500.000 (> 45k & > 35k) → skip mcap_onchain_pucuk",
+      not ok and tag == "mcap_onchain_pucuk", tag)
+
+# Kasus tepat pucuk goldilocks ($40.000: di atas 35k tapi di bawah 45k)
+listener._trader = QuoterRunner(supply=16_000_000)
+ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
+check("mcap on-chain $50.000 ($40k on-chain > goldilocks 35k) → pucuk",
+      not ok and tag == "mcap_onchain_pucuk", tag)
+
+# Hmm: 0.0025 × 16jt = $40.000. Periksa detail.
+listener._trader = QuoterRunner(supply=10_000_000)  # 0.0025 × 10jt = $25.000 ≤ 35k
+ok, tag, metr = asyncio.run(_fastpath_gate(CA, p_ok))
+check("mcap on-chain $25.000 (di bawah 35k tapi layar bilang 11k) → LOLOS",
+      ok and tag == "" and abs(metr.get("mcap_onchain", 0) - 25000.0) < 0.01,
+      f"tag={tag} mcap_onchain={metr.get('mcap_onchain')}")
 
 
 class QuoterFail(FakeTrader):
@@ -247,7 +291,7 @@ class QuoterFail(FakeTrader):
 
 listener._trader = QuoterFail()
 ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
-check("quoter revert → skip quote_gagal",
+check("quoter revert/pool kosong → skip quote_gagal",
       not ok and tag.startswith("quote_gagal:"), tag)
 
 # quote OK: 5000 token → entry $5/5000 = 0.001 → mcap on-chain

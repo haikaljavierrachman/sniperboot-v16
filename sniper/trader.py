@@ -201,6 +201,34 @@ class Trader:
         expected = (eth_in / price_native) if price_native else 0
         min_out = int(expected * (1 - slippage) * 10**dec) if expected else 0
 
+        # ---------- ON-CHAIN SPOT PRICE ANCHOR (v16.6) ----------
+        # Harga layar Dexscreener cached 20-30 detik. Pada koin runner, harga
+        # on-chain sudah lari ke depan sementara layar masih menampilkan
+        # harga pool saat creation — memicu revert TIDAK WAJAR karena min_out
+        # mengacu ke harga layar basi. Probe quote riil on-chain dulu
+        # (min_out=0 = spot probe murni); bila sukses → min_out dari quote
+        # aktual dgn toleransi slippage sebagai proteksi drift antar-blok
+        # terhadap HARGA RIIL on-chain, bukan harga layar.
+        try:
+            ptype_probe = ptype
+            fee_probe = 3000
+            pool_id_probe = None
+            if ptype_probe == "v3":
+                try:
+                    fee_probe = int(self.pool_fee(pair["pairAddress"]))
+                except Exception:
+                    fee_probe = 3000
+            if ptype_probe == "v4":
+                pool_id_probe = pair.get("pairAddress")
+            ok_q, amt_q, _qerr = self.quote_buy_tokens(
+                ca, ptype_probe, fee_probe, wei_in, min_out=0,
+                pool_id=pool_id_probe)
+            if ok_q and amt_q > 0:
+                min_out = int(amt_q * (1.0 - slippage))
+        except Exception as e:
+            print(f"[buy anchor] {sym} quoter spot probe gagal "
+                  f"({e}) — fallback rumus priceNative")
+
         before = token.functions.balanceOf(self.addr).call()
         eth_before = self.w3.eth.get_balance(self.addr)
 

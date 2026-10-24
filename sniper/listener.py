@@ -270,9 +270,9 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
 
     skip_tag:
       'dev_terlalu_besar'  — safety menolak (dev/top10/honeypot/fail-closed)
-      'quote_gagal:<err>'  — quoter on-chain revert/gagal
-      'slippage_besar'     — quote di bawah ambang slippage 15%
-      'mcap_onchain_pucuk' — mcap hasil quote on-chain > scanner_mcap_max
+      'quote_gagal:<err>'  — quoter on-chain revert/gagal (spot probe min_out=0)
+      'mcap_onchain_pucuk' — mcap hasil quote on-chain > goldilocks_max_mcap
+                             / scanner_mcap_max
     """
     # ---- c. safety guard (bytecode honeypot + dev + top10) ----
     ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
@@ -296,7 +296,11 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         return False, tag, metr
     liq, mcap, pool_age = metr["liq"], metr["mcap"], metr["pool_age"]
 
-    # ---- d. zero-gas on-chain quoter (slippage ≤ 25% + mcap on-chain) ----
+    # ---- d. zero-gas on-chain quoter (SPOT PROBE → mcap on-chain) ----
+    # Anchor harga = quote on-chain AKTUAL (min_out=0), BUKAN priceNative
+    # layar Dexscreener yang cached 20-30s. Runner harga cepat ($8k →
+    # $15k-$20k) tidak lagi salah di-reject sebagai 'slippage_besar';
+    # pagar nyata hanyalah MARKET CAP on-chain (anti-pucuk).
     buy_usd = db.get("buy_usd")
     eth_price = dx.eth_usd(pair)
     eth_spent = buy_usd / eth_price if eth_price > 0 else 0
@@ -313,20 +317,13 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         dec = int(_trader.erc20(ca).functions.decimals().call())
     except Exception:
         dec = 18
-    price_native = float(pair.get("priceNative") or 0)
-    expected_tokens = (eth_spent / price_native) if price_native > 0 else 0
-    max_slip = float(db.get("goldilocks_max_slippage", float) or 0.25)
-    min_out_raw = int(expected_tokens * (1.0 - max_slip) * (10 ** dec)) \
-        if expected_tokens > 0 else 0
     try:
         ok_q, amt_raw, err_reason = await asyncio.to_thread(
             _trader.quote_buy_tokens, ca, ptype, fee, wei_in,
-            min_out_raw, pool_id=pair["pairAddress"])
+            0, pool_id=pair["pairAddress"])
     except Exception as e:
         ok_q, amt_raw, err_reason = False, 0, f"quoter_exception:{e}"
     if not ok_q or amt_raw <= 0:
-        if err_reason == "slippage_exceeded_onchain":
-            return False, "slippage_besar", metr
         return False, f"quote_gagal:{err_reason or 'quoter_gagal'}", metr
 
     tokens_total = amt_raw / (10 ** dec)
@@ -341,8 +338,13 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         pair_price = float(pair.get("priceUsd") or 0)
         total_supply = (mcap / pair_price) if pair_price > 0 else 1_000_000_000
     mcap_onchain = entry_price_usd * total_supply
+    # ---- GUARD NYATA ADALAH MARKET CAP (anti-pucuk) ----
+    # Harga on-chain berada di rentang aman? Perbedaan harga layar
+    # Dexscreener vs on-chain BUKAN slippage — koin runner di jendela
+    # harga masuk. Bila menyentuh pucuk → tolak.
     scanner_mcap_max = float(db.get("scanner_mcap_max", float) or 45000)
-    if mcap_onchain > scanner_mcap_max:
+    gold_max_mcap = float(db.get("goldilocks_max_mcap", float) or 35000)
+    if mcap_onchain > scanner_mcap_max or mcap_onchain > gold_max_mcap:
         return False, "mcap_onchain_pucuk", metr
     metr.update({"tokens_total": tokens_total,
                  "entry_price_usd": entry_price_usd,
@@ -553,21 +555,18 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
             except Exception:
                 fee_dx = 3000
         wei_in = _trader.w3.to_wei(eth_spent, "ether") if eth_spent > 0 else 0
-        # expected (harga layar) → ambang min_out untuk guard slippage
+        # expected (harga layar BASI 20-30s) TIDAK dipakai sebagai anchor —
+        # runner cepat ($8k → $15k-$20k) membuat min_out layar memicu revert
+        # palsu. Min_out=0 → probe spot on-chain murni; pagar nyata = mcap.
         dec = 18
         try:
             dec = int(_trader.erc20(ca).functions.decimals().call())
         except Exception:
             dec = 18
-        price_native = float(pair.get("priceNative") or 0)
-        expected_tokens = (eth_spent / price_native) if price_native > 0 else 0
-        slippage_buy = db.get("buy_slippage")
-        min_out_raw = int(expected_tokens * (1.0 - slippage_buy) * (10 ** dec)) \
-            if expected_tokens > 0 else 0
         try:
             ok_q, amt_raw, err_reason = await asyncio.to_thread(
                 _trader.quote_buy_tokens, ca, ptype_dx, fee_dx, wei_in,
-                min_out_raw, pool_id=pair["pairAddress"])
+                0, pool_id=pair["pairAddress"])
         except Exception as e:
             ok_q, amt_raw, err_reason = False, 0, f"quoter_exception:{e}"
         if not ok_q or amt_raw <= 0:
