@@ -83,26 +83,33 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     # TETAP identik dengan posisi nyata.
     if pos.get("is_simulated"):
         sold = pos["tokens_left"] * fraction
-        eth_real = sold * price_native if price_native > 0 else (
-            pos["eth_spent"] * fraction * (1 + spot_pnl))
-        if reason == "rug":
-            # 💀 RUG PULL: harga layar Dexscreener basi/delay — hasil jual
-            # WAJIB dari quote on-chain riil. Pool kosong → 0.0 ETH
-            # (net loss -100%), JANGAN kasih angka palsu/pnp profit phantom.
-            if _trader:
-                try:
-                    amt_raw = int(sold * 10**(
-                        await asyncio.to_thread(
-                            _trader.erc20(pos["ca"]).functions.decimals().call)))
-                    if amt_raw > 0:
-                        q_eth = await asyncio.to_thread(
-                            _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
-                            pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
-                        # quote 0/revert → pool on-chain sudah kosong
-                        eth_real = max(q_eth, 0.0) if q_eth > 0 else 0.0
-                except Exception:
+        # 🧪 Hasil jual dihitung dari quote on-chain RIIL (quoter pool asli),
+        # bukan harga Dexscreener yang basi 20-40 detik — supaya realized PnL
+        # simulasi mencerminkan hasil Nx yang sebenarnya bisa didapat.
+        eth_real = None
+        if _trader:
+            try:
+                amt_raw = int(sold * 10**(
+                    await asyncio.to_thread(
+                        _trader.erc20(pos["ca"]).functions.decimals().call)))
+                if amt_raw > 0:
+                    q_eth = await asyncio.to_thread(
+                        _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
+                        pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
+                    if q_eth and q_eth > 0:
+                        eth_real = q_eth
+            except Exception:
+                if reason == "rug":
                     # revert/probing gagal total saat rug → asumsi pool mati
                     eth_real = 0.0
+        if eth_real is None:
+            if reason == "rug":
+                # 💀 RUG PULL: quote 0/gagal → pool on-chain sudah kosong
+                # (net loss -100%), JANGAN kasih angka palsu/profit phantom.
+                eth_real = 0.0
+            else:
+                eth_real = sold * price_native if price_native > 0 else (
+                    pos["eth_spent"] * fraction * (1 + spot_pnl))
         gas_eth = 0.00005
         swap_tx = "simulated_sell"
     else:
@@ -340,7 +347,31 @@ async def _check(pos):
                 await _notify(f"⚠️ Emergency exit {pos['symbol']} GAGAL (LP mungkin sudah kosong): {e}")
             return
 
-    pnl = price / pos["entry_price_usd"] - 1
+    # ---------- 💹 PnL utama: quote jual on-chain RIIL ----------
+    # Harga Dexscreener bisa basi 20-40 detik — koin runner baru dibeli
+    # punya harga on-chain lebih tinggi dari layar, sehingga PnL layar bisa
+    # boltak -30%+ palsu di poll pertama dan memicu SL palsu. PnL dihitung
+    # dari quoter on-chain asli (nembus depth pool); Dexscreener hanya fallback.
+    onchain_pnl = None
+    if _trader:
+        try:
+            token = _trader.erc20(pos["ca"])
+            dec = await asyncio.to_thread(token.functions.decimals().call)
+            amt_raw = int(pos["tokens_left"] * 10**dec)
+            if amt_raw > 0:
+                q_eth = await asyncio.to_thread(
+                    _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
+                    pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
+                cost_eth = pos["eth_spent"] * (pos["tokens_left"] / pos["tokens_total"]) \
+                    if pos["tokens_total"] else 0
+                if cost_eth > 0 and q_eth > 0:
+                    onchain_pnl = q_eth / cost_eth - 1.0
+        except Exception:
+            pass  # quoter gagal → fallback ke harga layar di bawah
+    if onchain_pnl is not None:
+        pnl = onchain_pnl
+    else:
+        pnl = price / pos["entry_price_usd"] - 1
     tp1_v = pos.get("tp1_x") or db.get("tp1")
     tp2_v = pos.get("tp2_x") or db.get("tp2")
     sl_v = pos.get("sl_x") or db.get("sl")

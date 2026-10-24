@@ -181,7 +181,9 @@ async def pair_ok(pos):
 
 engine.current_pair = pair_ok
 engine._liq_last[pos_id2] = 10000.0          # baseline sebelum drop
-QUOTE.value, QUOTE.raise_boom = 0.475, False  # >= 50% dari expected (1000 × 0.00055 = 0.55 ETH) → 0.275
+# quote sehat: ≥ 50% expected spot (0.275) DAN tidak men-trigger SL dari
+# modal (cost 1.0 ETH): 0.9/1.0-1 = -10% — di atas SL -30%.
+QUOTE.value, QUOTE.raise_boom = 0.9, False
 try:
     asyncio.run(engine._check(dict(_pos2)))
     check("false alarm dibatalkan → status masih open",
