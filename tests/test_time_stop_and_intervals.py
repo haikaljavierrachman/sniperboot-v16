@@ -186,13 +186,13 @@ def test_timeout_reason_recorded_in_daily_recap():
 
 def test_defaults_poin234():
     assert config.SETTING_DEFAULTS["poll_seconds"] == "5"
-    assert config.SETTING_DEFAULTS["max_hold_sec"] == "1200"
+    assert config.SETTING_DEFAULTS["max_hold_sec"] == "420"
     assert config.SETTING_DEFAULTS["scanner_max_age_min"] == "5"
 
 
 def test_max_hold_label_present():
     assert "max_hold_sec" in config.SETTING_LABELS
-    assert "20m" in config.SETTING_LABELS["max_hold_sec"]
+    assert "7m" in config.SETTING_LABELS["max_hold_sec"]
 
 
 def test_rotate_interval_sec_six_hours():
