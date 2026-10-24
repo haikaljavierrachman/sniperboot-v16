@@ -58,6 +58,19 @@ MAX_SLIP_PCT = 5.0
 BLOCK_GRACE = 6.0   # dtk kedaluwarsa menanti blok "hampir" terlewat
 POLL_IDLE = 0.5     # dtk kalau tidak ada blok baru (Robinhood Chain ~10 blok/dtk)
 
+# ============ BATCH LOG SCAN (anti-lag) ============
+# Node publik Robinhood Chain menolak WSS (Cloudflare/Envoy HTTP 400) dan
+# eth_get_block per-blok lambat (~270ms) → tertinggal 7 blok/dtk. Solusi:
+# eth_getLogs batch — 50–300 blok dalam 1 RPC call (~250ms). Filter topic
+# ERC20 Transfer(address indexed from, address indexed to) dengan to =
+# wallet insider. Event = insider menerima/membeli token asli (BUKAN quote).
+TRANSFER_TOPIC = ("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55"
+                  "a4df523b3ef")
+BATCH_MAX_BLOCKS = 100   # sapu maks 100 blok per siklus batch
+CATCHUP_LIMIT = 500      # kalau tertinggal > 500 blok → fast-forward
+CATCHUP_KEEP = 50        # ...tapi tetap pindai 50 blok terakhir
+POLL_INTERVAL = 2.5      # 2.5s ≈ ~25 blok baru di Robinhood Chain
+
 # Pola deteksi token dalam path bytes (exactInput/multicall path):
 # data dexscreener adalah HEX TELANJANG (tanpa "0x"), jadi regex cari
 # run hex ≥40 karakter lalu ambil 40 karakter pertama dari tiap run
@@ -257,6 +270,77 @@ async def _inspect_block(w3, block_number: int):
     return sent
 
 
+# ============================ BATCH LOG SCAN ============================
+
+def _insider_to_topic2(insiders: set) -> list:
+    """Susun padded address 32-byte utk topic2 (address indexed `to`)."""
+    return ["0x000000000000000000000000" + a.lower().replace("0x", "")
+            for a in insiders]
+
+
+def _topic_addr(topic) -> str:
+    """Ekstrak alamat 20B dari sebuah log topic (HexBytes/HexStr/str)."""
+    s = topic.hex() if hasattr(topic, "hex") else str(topic)
+    return "0x" + s[-40:].lower()
+
+
+async def _inspect_logs(w3, from_block: int, to_block: int) -> int:
+    """Pindai [from_block..to_block] dalam SATU eth_getLogs call:
+    cari event ERC20 Transfer ke wallet insider → pipa process_insider_buy.
+
+    Return jumlah sinyal yang dikirim. Dedup per-call: satu token (CA)
+    hanya dikirim sekali per siklus batch meski muncul di banyak log,
+    dan event kecil token transfer (bukan swap router) tetap menuju pipa.
+    """
+    insiders = set(db.get_active_insiders())
+    if not insiders:
+        return 0
+
+    padded = _insider_to_topic2(insiders)
+    filt = {
+        "fromBlock": from_block,
+        "toBlock": to_block,
+        "topics": [TRANSFER_TOPIC, None, padded],
+    }
+    try:
+        logs = await asyncio.to_thread(w3.eth.get_logs, filt)
+    except Exception as e:
+        print(f"[tracker] get_logs [{from_block}..{to_block}] fail: {e}")
+        return 0
+
+    sent = 0
+    seen_tokens = set()
+    for log in (logs or []):
+        token_ca = (log.get("address") or "").lower()
+        if not token_ca or token_ca in QUOTE_ASSETS:
+            continue          # WETH/USDG transfer = SELL insider / unwrap
+        if token_ca in seen_tokens:
+            continue          # dedup batch — cukup sinyal sekali per CA
+        to_hex = log["topics"][2].hex() if hasattr(log["topics"][2], "hex") \
+            else str(log["topics"][2])
+        insider_addr = "0x" + to_hex[-40:].lower()
+        if insider_addr not in insiders:
+            continue
+        # 🔒 slippage guard: harga sudah lari >MAX_SLIP_PCT% → skip
+        try:
+            pair = await asyncio.to_thread(dx.best_pair, token_ca)
+            pc = (((pair or {}).get("priceChange") or {}).get("m5")) or 0.0
+            if float(pc) > MAX_SLIP_PCT:
+                print(f"[tracker] beta pusing: 'insider buy "
+                      f"{token_ca[:10]}… skip — harga sudah +{pc:.1f}% "
+                      f"dalam 5m (slippage guard)")
+                continue
+        except Exception:
+            pass  # data harga gagal → jangan block-trade
+        try:
+            await process_insider_buy(token_ca, insider_addr=insider_addr)
+            seen_tokens.add(token_ca)
+            sent += 1
+        except Exception as e:
+            print(f"[tracker] process_insider_buy fail: {e}")
+    return sent
+
+
 # ============================ LOOP UTAMA ============================
 
 async def tracker_loop():
@@ -293,20 +377,27 @@ async def tracker_loop():
             if latest <= last_num:
                 await asyncio.sleep(POLL_IDLE)
                 continue
-            if latest - last_num > 50:
-                last_num = latest - 5
 
-            # Pindai blok 'latest' dulu; blok terlewat dikerjakan mundur hingga
-            # grace. Simpan finger setelah sukses agar tidak scan ulang.
-            nums = list(range(last_num + 1, latest + 1))
-            for n in nums:
-                try:
-                    await _inspect_block(w3, n)
-                except Exception as e:
-                    print(f"[tracker] inspect {n} fail: {e}")
-                db.set_("tracker_last_block", n)
-                last_num = n
-                await asyncio.sleep(0.05)   # tolak rate-limit RPC
+            # Proteksi kalau tertinggal terlalu jauh (baru start / bot mati
+            # lama): fast-forward, tapi tetap pindai CATCHUP_KEEP blok akhir.
+            if latest - last_num > CATCHUP_LIMIT:
+                print(f"[tracker] tertinggal {latest - last_num} blok — "
+                      f"fast-forward ke {latest - CATCHUP_KEEP}")
+                last_num = latest - CATCHUP_KEEP
+
+            # Batch scan: satu eth_getLogs mengecek hingga BATCH_MAX_BLOCKS
+            # blok (anti-lag; benchmark riil 50–300 blok ≈ 250ms 1 RPC call).
+            from_block = last_num + 1
+            to_block = min(latest, from_block + BATCH_MAX_BLOCKS - 1)
+            try:
+                await _inspect_logs(w3, from_block, to_block)
+            except Exception as e:
+                print(f"[tracker] inspect_logs "
+                      f"[{from_block}..{to_block}] fail: {e}")
+            db.set_("tracker_last_block", to_block)
+            last_num = to_block
+            # 2.5s ≈ ~25 blok baru di Robinhood Chain (~10.6 blk/dtk)
+            await asyncio.sleep(POLL_INTERVAL)
         except asyncio.CancelledError:
             raise
         except Exception as e:

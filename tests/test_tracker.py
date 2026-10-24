@@ -298,6 +298,50 @@ def test_inspect_block_sell_skipped():
         config.DB_PATH = old
 
 
+def test_inspect_logs_batch():
+    """Batch log scan via eth_getLogs: mendeteksi transfer token ke insider."""
+    path, old = _fresh_db()
+    try:
+        db.init()
+        insider = "0x" + "a" * 40
+        db.add_insider_wallet(insider, win_count=1)
+        token_ca = "0x" + "b" * 40
+
+        class FakeW3Logs:
+            def __init__(self, logs):
+                self._logs = logs
+                self.eth = self
+            def get_logs(self, filt):
+                return self._logs
+
+        fake_log = {
+            "address": token_ca,
+            "topics": [
+                bytes.fromhex(tracker.TRANSFER_TOPIC[2:]),
+                bytes.fromhex("0" * 24 + "1" * 40),
+                bytes.fromhex("0" * 24 + insider[2:]),
+            ]
+        }
+        sent = []
+        async def fake_process(ca, insider_addr="", notify=None):
+            sent.append((ca, insider_addr))
+
+        orig_p, orig_pair = tracker.process_insider_buy, tracker.dx.best_pair
+        tracker.process_insider_buy = fake_process
+        tracker.dx.best_pair = lambda ca: {"priceChange": {"m5": 0.0}}
+        try:
+            got = asyncio.run(tracker._inspect_logs(FakeW3Logs([fake_log]), 100, 150))
+        finally:
+            tracker.process_insider_buy, tracker.dx.best_pair = orig_p, orig_pair
+
+        assert got == 1, got
+        assert sent == [(token_ca.lower(), insider.lower())], sent
+        print("PASS _inspect_logs batch transfer detection")
+    finally:
+        os.unlink(path)
+        config.DB_PATH = old
+
+
 if __name__ == "__main__":
     test_extract_exact_input_single()
     test_extract_exact_input_single_reverse()
@@ -311,4 +355,5 @@ if __name__ == "__main__":
     test_inspect_block_ignores_non_insider()
     test_inspect_block_price_guard()
     test_inspect_block_sell_skipped()
+    test_inspect_logs_batch()
     print("ALL TRACKER TESTS PASSED ✅")
