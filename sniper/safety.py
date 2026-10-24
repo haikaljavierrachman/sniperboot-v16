@@ -11,6 +11,7 @@ except ImportError:
     import requests as _requests
     _S = _requests.Session()
     _S.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+    print("[safety] ⚠️ PERINGATAN: curl_cffi belum terpasang! Query explorer Blockscout akan diblokir Cloudflare 403 (fail-closed). Jalankan: pip install curl_cffi")
 from web3 import Web3
 from . import config, db
 
