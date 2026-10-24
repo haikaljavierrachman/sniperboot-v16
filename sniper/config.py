@@ -14,9 +14,9 @@ RPC_URL       = os.getenv("RPC_URL", "https://rpc.mainnet.chain.robinhood.com")
 CHAIN_ID      = _i("CHAIN_ID", 4663)
 PRIVATE_KEY   = os.getenv("PRIVATE_KEY", "")
 
-# ---- Uniswap di Robinhood Chain ----
-SWAP_ROUTER02 = os.getenv("SWAP_ROUTER02", "")
-V2_ROUTER     = os.getenv("V2_ROUTER", "")
+# ---- Uniswap di Robinhood Chain (Chain 4663) ----
+SWAP_ROUTER02 = os.getenv("SWAP_ROUTER02", "0xcaf681a66d020601342297493863e78c959e5cb2")
+V2_ROUTER     = os.getenv("V2_ROUTER", "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba")
 
 # ---- Telegram userbot (Telethon, QR login) ----
 TG_API_ID     = _i("TG_API_ID", 0)
