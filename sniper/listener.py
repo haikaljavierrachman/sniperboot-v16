@@ -381,6 +381,10 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
     sym = pair.get("baseToken", {}).get("symbol", "?")
     ptype_dx = dx.pool_type(pair)
 
+    # ---------- Duopoli Guard: Tolak pool v3 (sarang tick-trap 100% rug) ----------
+    if db.get("scanner_ignore_v3", str) == "1" and src.get("name") == "SCANNER" and ptype_dx == "v3":
+        return "filtered:v3_pool_disabled"
+
     # ---------- v4: likuiditas Dexscreener sering null ----------------
     # Jangan sampai filter min-liq salah menolak (atau rug monitor buta).
     # Bila null → baca likuiditas ON-CHAIN StateView.getLiquidity; kalau

@@ -235,15 +235,12 @@ def fetch_factory_candidates(w3) -> list:
         "scanner_last_block", parse_pool_created_log)
 
 
-# Urutan = prioritas kesegaran: launchpad dulu (paling awal), lalu v4
-# (venue meme utama chain ini), lalu v3, terakhir v2.
+# Urutan prioritas Duopoli: v4 (venue meme utama chain ini, ~70%),
+# lalu v2 (klasik x*y=k, ~17%).
+# Uniswap v3 (sarang jebakan tick range) dan Pons dinonaktifkan.
 _EVENT_SOURCES = [
-    ("pons", PONS_V2_FACTORY, PONS_LAUNCHED_SIG,
-     "scanner_last_block_pons", parse_pons_launched_log),
     ("factory-v4", V4_POOL_MANAGER, V4_INITIALIZE_SIG,
      "scanner_last_block_v4", parse_v4_initialize_log),
-    ("factory", V3_FACTORY, POOL_CREATED_SIG,
-     "scanner_last_block", parse_pool_created_log),
     ("factory-v2", V2_FACTORY, V2_PAIR_CREATED_SIG,
      "scanner_last_block_v2", parse_pool_created_log),
 ]
