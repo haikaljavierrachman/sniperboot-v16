@@ -129,6 +129,21 @@ SETTING_DEFAULTS = {
     # ---- 🧪 Dompet kas virtual (paper trading mode latihan) ----
     "paper_initial_usd": "100.0",
     "paper_cash_usd":    "100.0",
+    # ---- ⚡ FAST-PATH Goldilocks Defensive (entry tanpa LLM) ----
+    # entry_mode: 'mata' = MATA (LLM memutuskan), 'fast' = evaluasi murni
+    # matematika/bytecode (0 detik LLM). Toggle via panel 🧠 Otak.
+    "entry_mode":                 "mata",
+    "goldilocks_min_age_sec":     "30",
+    "goldilocks_max_age_sec":     "180",
+    "goldilocks_min_liq":         "4000.0",
+    "goldilocks_min_liq_mcap_ratio": "0.35",
+    "goldilocks_max_mcap":        "28000.0",
+    "goldilocks_min_mcap":        "7000.0",
+    "goldilocks_max_dev_pct":     "0.03",
+    "goldilocks_max_top10_pct":   "0.25",
+    "goldilocks_max_slippage":    "0.15",
+    "goldilocks_tp1":             "0.35",
+    "goldilocks_tp2":             "0.80",
 }
 
 SETTING_LABELS = {
@@ -171,6 +186,18 @@ SETTING_LABELS = {
     "scanner_batch_max":     "🔭 Scanner: maks koin diambil per siklus (2)",
     "scanner_concurrency":   "🔭 Scanner: maks evaluasi paralel serentak (Semaphore)",
     "tracker_auto_rotate":   "🔄 Tracker: rotasi wallet insider otomatis 24h (1/0)",
+    "entry_mode":            "⚡ Mode entry (mata/fast)",
+    "goldilocks_min_age_sec":     "⚡ Goldilocks: min umur pool (dtk)",
+    "goldilocks_max_age_sec":     "⚡ Goldilocks: maks umur pool (dtk)",
+    "goldilocks_min_liq":         "⚡ Goldilocks: min likuiditas (USD)",
+    "goldilocks_min_liq_mcap_ratio": "⚡ Goldilocks: min rasio liq/mcap",
+    "goldilocks_max_mcap":        "⚡ Goldilocks: maks mcap (USD)",
+    "goldilocks_min_mcap":        "⚡ Goldilocks: min mcap (USD)",
+    "goldilocks_max_dev_pct":     "⚡ Goldilocks: maks dev (rasio 0-1)",
+    "goldilocks_max_top10_pct":   "⚡ Goldilocks: maks top10 (rasio 0-1)",
+    "goldilocks_max_slippage":    "⚡ Goldilocks: maks slippage quote",
+    "goldilocks_tp1":             "⚡ Goldilocks: TP1 (0.35 = +35%)",
+    "goldilocks_tp2":             "⚡ Goldilocks: TP2 (0.80 = +80%)",
 }
 
 def validate():

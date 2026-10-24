@@ -204,6 +204,141 @@ def _extract_ca_strict(text) -> list:
     return list(dict.fromkeys(found))
 
 
+# =====================================================================
+#  ⚡ FAST-PATH GOLDILOCKS DEFENSIVE — evaluasi entry MURNI math/bytecode
+#  (0 detik LLM). Toggle via panel 🧠 Otak (setting 'entry_mode').
+#  Fungsi evaluasi murni (tanpa I/O) dipisah agar bisa di-unit-test;
+#  benda I/O (safety, quoter on-chain, notif) ada di _fastpath_gate.
+# =====================================================================
+def goldilocks_eval(pair) -> tuple[bool, str, dict]:
+    """Filter statistik Goldilocks dari data Dexscreener (murni math).
+
+    Return (lolos, skip_tag, metrik). skip_tag dipakai untuk status
+    'skip_fast:<tag>' (umur/liq/mcap/ratio). Safety dev/top10 & slippage
+    quoter diverifikasi di _fastpath_gate (butuh I/O on-chain).
+    """
+    now_ms = time.time() * 1000
+    min_age = float(db.get("goldilocks_min_age_sec", float) or 30)
+    max_age = float(db.get("goldilocks_max_age_sec", float) or 180)
+    min_liq = float(db.get("goldilocks_min_liq", float) or 4000.0)
+    min_ratio = float(db.get("goldilocks_min_liq_mcap_ratio", float) or 0.35)
+    max_mcap = float(db.get("goldilocks_max_mcap", float) or 28000.0)
+    min_mcap = float(db.get("goldilocks_min_mcap", float) or 7000.0)
+
+    # ---- a. umur pool (pairCreatedAt milidetik) ----
+    created = pair.get("pairCreatedAt")
+    try:
+        pool_age = max(0.0, (now_ms - float(created)) / 1000.0) if created else None
+    except (TypeError, ValueError):
+        pool_age = None
+    if pool_age is None:
+        return False, "age_unknown", {"pool_age": None}
+    if pool_age < min_age:
+        return False, f"age_{pool_age:.0f}s", {"pool_age": pool_age}
+    if pool_age > max_age:
+        return False, f"age_{pool_age:.0f}s", {"pool_age": pool_age}
+
+    # ---- b. likuiditas & mcap ----
+    liq = dx.liq_usd_or_none(pair)
+    mcap = dx.mcap_of(pair)
+    metr = {"pool_age": pool_age, "liq": liq, "mcap": mcap,
+            "ratio": (liq / mcap) if (liq and mcap > 0) else 0.0}
+    if liq is None or liq < min_liq:
+        return False, "liq_rendah", metr
+    if mcap <= 0 or mcap < min_mcap or mcap > max_mcap:
+        return False, "mcap_out_of_range", metr
+    # rasio likuiditas/mcap: liku harus tebal dibanding kapitalisasi
+    if metr["ratio"] < min_ratio:
+        return False, "liq_ratio_rendah", metr
+    return True, "", metr
+
+
+async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
+    """Gate lengkap fast-path (bagian I/O): safety dev/top10/honeypot +
+    quote on-chain mcap guard. Return (lolos, skip_tag, metrik goldilocks).
+
+    skip_tag:
+      'dev_terlalu_besar'  — safety menolak (dev/top10/honeypot/fail-closed)
+      'quote_gagal:<err>'  — quoter on-chain revert/gagal
+      'slippage_besar'     — quote di bawah ambang slippage 15%
+      'mcap_onchain_pucuk' — mcap hasil quote on-chain > scanner_mcap_max
+    """
+    # ---- c. safety guard (bytecode honeypot + dev + top10) ----
+    ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
+    if not ok:
+        print(f"[fast-safety] {ca[:10]}: {reason}")
+        return False, "dev_terlalu_besar", {}
+    # batas dev/top10 ketat versi Goldilocks (rasio, bukan persen)
+    max_dev = float(db.get("goldilocks_max_dev_pct", float) or 0.03)
+    max_top = float(db.get("goldilocks_max_top10_pct", float) or 0.25)
+    dev = safety.dev_pct(_trader, ca)          # persen (0-100)
+    if dev and dev / 100.0 > max_dev:
+        return False, "dev_terlalu_besar", {}
+    exclude = {pair.get("pairAddress", ""), ca}
+    top = safety.top_holders_pct(_trader, ca, exclude)  # persen (0-100)
+    if top and top / 100.0 > max_top:
+        return False, "top10_terlalu_besar", {}
+
+    metr = {}
+    ok_m, tag, metr = goldilocks_eval(pair)
+    if not ok_m:  # data berubah sejak tahap pertama — pakai tag terakhir
+        return False, tag, metr
+    liq, mcap, pool_age = metr["liq"], metr["mcap"], metr["pool_age"]
+
+    # ---- d. zero-gas on-chain quoter (slippage ≤ 15% + mcap on-chain) ----
+    buy_usd = db.get("buy_usd")
+    eth_price = dx.eth_usd(pair)
+    eth_spent = buy_usd / eth_price if eth_price > 0 else 0
+    ptype = dx.pool_type(pair)
+    fee = 3000
+    if ptype == "v3":
+        try:
+            fee = int(_trader.pool_fee(pair["pairAddress"]))
+        except Exception:
+            fee = 3000
+    wei_in = _trader.w3.to_wei(eth_spent, "ether") if eth_spent > 0 else 0
+    dec = 18
+    try:
+        dec = int(_trader.erc20(ca).functions.decimals().call())
+    except Exception:
+        dec = 18
+    price_native = float(pair.get("priceNative") or 0)
+    expected_tokens = (eth_spent / price_native) if price_native > 0 else 0
+    max_slip = float(db.get("goldilocks_max_slippage", float) or 0.15)
+    min_out_raw = int(expected_tokens * (1.0 - max_slip) * (10 ** dec)) \
+        if expected_tokens > 0 else 0
+    try:
+        ok_q, amt_raw, err_reason = await asyncio.to_thread(
+            _trader.quote_buy_tokens, ca, ptype, fee, wei_in,
+            min_out_raw, pool_id=pair["pairAddress"])
+    except Exception as e:
+        ok_q, amt_raw, err_reason = False, 0, f"quoter_exception:{e}"
+    if not ok_q or amt_raw <= 0:
+        if err_reason == "slippage_exceeded_onchain":
+            return False, "slippage_besar", metr
+        return False, f"quote_gagal:{err_reason or 'quoter_gagal'}", metr
+
+    tokens_total = amt_raw / (10 ** dec)
+    entry_price_usd = (db.get("buy_usd") / tokens_total) if tokens_total > 0 else 0
+    total_supply = None
+    try:
+        supply_raw = await asyncio.to_thread(_trader.erc20(ca).functions.totalSupply().call)
+        total_supply = supply_raw / (10 ** dec)
+    except Exception:
+        total_supply = None
+    if not total_supply or total_supply <= 0:
+        pair_price = float(pair.get("priceUsd") or 0)
+        total_supply = (mcap / pair_price) if pair_price > 0 else 1_000_000_000
+    mcap_onchain = entry_price_usd * total_supply
+    scanner_mcap_max = float(db.get("scanner_mcap_max", float) or 45000)
+    if mcap_onchain > scanner_mcap_max:
+        return False, "mcap_onchain_pucuk", metr
+    metr.update({"tokens_total": tokens_total,
+                 "entry_price_usd": entry_price_usd,
+                 "mcap_onchain": mcap_onchain})
+    return True, "", metr
+
+
 async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
     """Proses SATU kandidat CA lewat pipa: filter → sosmed → safety → Mata → buy.
 
@@ -283,9 +418,53 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         await _notify(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason}")
         return "filtered:safety"
 
+    # ---------- ⚡ FAST-PATH GOLDILOCKS (entry_mode='fast', 0 detik LLM) ----
+    # Evaluasi murni matematika/bytecode: umur pool → liq/mcap → safety →
+    # quote on-chain (slippage ≤ 15%, mcap on-chain ≤ scanner_mcap_max).
+    # Lolos semua gate → keputusan sintetis conviction 90 → eksekusi di
+    # alur bawah (dry_run_simulated ATAU live buy) seperti biasa.
+    entry_mode = db.get("entry_mode", str) or "mata"
+    if entry_mode == "fast":
+        ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair)
+        if not ok_f:
+            print(f"[fast-skip] {sym}: {tag_f}")
+            await _notify(
+                f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
+                f"`{ca}`\nreason: {tag_f}")
+            return f"skip_fast:{tag_f}"
+        liq_f = metr_f.get("liq") or 0.0
+        mcap_f = metr_f.get("mcap") or 0.0
+        ratio_f = metr_f.get("ratio") or 0.0
+        age_f = metr_f.get("pool_age") or 0.0
+        tp1_f = float(db.get("goldilocks_tp1", float) or 0.35)
+        tp2_f = float(db.get("goldilocks_tp2", float) or 0.80)
+        decision = {
+            "action": "BUY",
+            "conviction": 90,
+            "size_mult": 1.0,
+            "tp1_x": tp1_f,
+            "tp2_x": tp2_f,
+            "sl_x": -0.30,
+            # alias kompatibilitas pipa eksekusi lama (blok dry-run/live
+            # membaca key tp1/tp2/sl)
+            "tp1": tp1_f, "tp2": tp2_f, "sl": -0.30,
+            "risks": "",
+            "reason": (f"⚡ FAST-PATH Goldilocks: umur {age_f:.0f}s, "
+                       f"liq ${liq_f:,.0f}, mcap ${mcap_f:,.0f}, "
+                       f"ratio {ratio_f * 100:.1f}%, quote OK"),
+        }
+        db.log_decision(ca=ca, symbol=sym, role="fastpath", action="BUY",
+                        conviction=90, size_mult=1.0,
+                        reason=decision["reason"], risks="goldilocks_defensive")
+        await _notify(
+            f"⚡ **FAST-PATH BUY {sym}** _via {src['name']}_\n"
+            f"`{ca}`\n📊 mcap ${mcap_f:,.0f} | liq ${liq_f:,.0f} "
+            f"({ratio_f * 100:.1f}%) | umur pool {age_f:.0f}s\n"
+            f"🎯 TP1 +{tp1_f * 100:.0f}% · TP2 +{tp2_f * 100:.0f}% · "
+            f"SL -30% (conviction 90)\n_{decision['reason']}_")
     # ---------- 👁 MATA: keputusan entry oleh LLM (opsional) ----------
-    decision = None
-    if db.get("agent_on", str) == "1" and config.LLM_API_KEY:
+    elif db.get("agent_on", str) == "1" and config.LLM_API_KEY:
+        decision = None
         try:
             decision = await asyncio.to_thread(
                 agent.decide_entry, pair, ca, src, reason,

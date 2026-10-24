@@ -244,8 +244,13 @@ def agent_panel():
     dry = db.get("agent_dry_run", str) == "1"
     key_ok = bool(config.LLM_API_KEY)
     n_lessons = len(db.recent_lessons(100))
+    mode = db.get("entry_mode", str) or "mata"
+    mode_line = ("👁 **MATA (LLM)** — keputusan entry oleh LLM"
+                 if mode == "mata"
+                 else "⚡ **FAST-PATH (Math)** — evaluasi murni matematika (0 detik LLM)")
     lines = [
         "🧠 **OTAK — lapisan LLM hoodsniper**\n",
+        f"⚡ saklar entry: {mode_line}",
         f"provider: **{config.LLM_PROTOCOL}**" + (f" · `{config.LLM_BASE_URL}`" if config.LLM_BASE_URL else ""),
         f"API key: {'✅ terpasang' if key_ok else '❌ belum ada LLM_API_KEY di .env'}",
         f"👁 Mata (keputusan entry): **{'ON' if on else 'OFF'}**",
@@ -258,6 +263,10 @@ def agent_panel():
         oc = f" → {d['outcome']}" if d.get("outcome") else ""
         lines.append(f"• [{d['role']}] **{d['action']} {d['symbol']}** ({d['conviction']}){oc}\n  _{d['reason'][:80]}_")
     buttons = [
+        [Button.inline(
+            ("🔘 Mode: 👁 MATA (LLM)" if mode == "mata"
+             else "🔘 Mode: ⚡ FAST-PATH (Math)"),
+            b"toggle_entry_mode")],
         [Button.inline(f"{'🔴 Off' if on else '🟢 On'} Mata", b"agt:on"),
          Button.inline(f"{'🔴 Off' if manage else '🟢 On'} Tangan", b"agt:manage")],
         [Button.inline(f"{'🔴 Live-kan' if dry else '🧪 Mode Latihan'}", b"agt:dry"),
@@ -429,6 +438,18 @@ async def _route(event, data):
     elif data == "agent":
         t, b = agent_panel()
         await event.edit(t, buttons=b)
+    elif data == "toggle_entry_mode":
+        new_mode = "fast" if (db.get("entry_mode", str) or "mata") == "mata" else "mata"
+        db.set_("entry_mode", new_mode)
+        toast = (f"⚡ Mode entry diubah ke: {new_mode.upper()} (0 detik LLM)"
+                 if new_mode == "fast"
+                 else f"👁 Mode entry diubah ke: MATA (keputusan via LLM)")
+        await event.answer(toast[:190])
+        t, b = agent_panel()
+        try:
+            await event.edit(t, buttons=b)
+        except Exception:
+            pass  # MessageNotModified / konten sama — abaikan
     elif data == "agt:on":
         db.set_("agent_on", "0" if db.get("agent_on", str) == "1" else "1")
         t, b = agent_panel(); await event.edit(t, buttons=b)
