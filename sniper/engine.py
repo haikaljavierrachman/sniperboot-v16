@@ -64,10 +64,16 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     if not pos or pos["status"] != "open":
         return "posisi sudah closed / tidak ditemukan"
     pair = await current_pair(pos)
-    if not pair:
+    if not pair and reason == "rug":
+        # Rug saat Dexscreener down/glitch: jangan gagalkan exit — lanjut
+        # tanpa harga layar (realized dihitung dari quote on-chain untuk
+        # simulasi, dari wallet asli untuk posisi riil).
+        price, price_native = 0.0, 0.0
+    elif not pair:
         return "gagal ambil harga pair dari Dexscreener"
-    price = float(pair.get("priceUsd") or 0)
-    price_native = float(pair.get("priceNative") or 0)
+    else:
+        price = float(pair.get("priceUsd") or 0)
+        price_native = float(pair.get("priceNative") or 0)
     spot_pnl = price / pos["entry_price_usd"] - 1 if price > 0 else 0
 
     # ---------- 🧪 POSISI SIMULASI (virtual paper trading) ----------
@@ -79,6 +85,24 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
         sold = pos["tokens_left"] * fraction
         eth_real = sold * price_native if price_native > 0 else (
             pos["eth_spent"] * fraction * (1 + spot_pnl))
+        if reason == "rug":
+            # 💀 RUG PULL: harga layar Dexscreener basi/delay — hasil jual
+            # WAJIB dari quote on-chain riil. Pool kosong → 0.0 ETH
+            # (net loss -100%), JANGAN kasih angka palsu/pnp profit phantom.
+            if _trader:
+                try:
+                    amt_raw = int(sold * 10**(
+                        await asyncio.to_thread(
+                            _trader.erc20(pos["ca"]).functions.decimals().call)))
+                    if amt_raw > 0:
+                        q_eth = await asyncio.to_thread(
+                            _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
+                            pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
+                        # quote 0/revert → pool on-chain sudah kosong
+                        eth_real = max(q_eth, 0.0) if q_eth > 0 else 0.0
+                except Exception:
+                    # revert/probing gagal total saat rug → asumsi pool mati
+                    eth_real = 0.0
         gas_eth = 0.00005
         swap_tx = "simulated_sell"
     else:
@@ -228,6 +252,30 @@ async def _check(pos):
         return
     pair = await current_pair(pos)
     if not pair:
+        # Dexscreener gagal/down (502/timeout/rate-limit) — jangan langsung
+        # biarkan: probing on-chain dulu via _trader. Kalau quote jual
+        # on-chain = 0 (pool di-drain / revert) padahal API mati → RUG.
+        if _trader and (pos.get("tokens_left") or 0) > 0:
+            try:
+                token = _trader.erc20(pos["ca"])
+                dec = await asyncio.to_thread(token.functions.decimals().call)
+                amt_raw = int(pos["tokens_left"] * 10**dec)
+                if amt_raw > 0:
+                    q_eth = await asyncio.to_thread(
+                        _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
+                        pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
+                    if q_eth <= 0:
+                        # Pool di-drain / revert on-chain saat Dexscreener
+                        # mati → RUG ALERT
+                        _cleanup(pos["id"])
+                        await _notify(
+                            f"🚨 **{pos['symbol']}** Dexscreener down & "
+                            f"quote on-chain 0 ETH — RUG PULL terdeteksi "
+                            f"on-chain! EMERGENCY EXIT")
+                        await _notify(await execute_sell(pos["id"], 1.0, "rug"))
+                        return
+            except Exception:
+                pass
         return
     price = float(pair.get("priceUsd") or 0)
     if price <= 0:
@@ -257,16 +305,40 @@ async def _check(pos):
     if liq > 0:
         _liq_last[pos["id"]] = liq
     if last_liq and last_liq > 0 and liq > 0 and liq < last_liq * (1 - db.get("rug_liq_drop")):
-        try:
-            _liq_last.pop(pos["id"], None)
-            _thin_warned.discard(pos["id"])
-            await _notify(
-                f"🚨 **{pos['symbol']}** liq anjlok ${last_liq:,.0f} → ${liq:,.0f} "
-                f"({(liq/last_liq-1)*100:.0f}%) — EMERGENCY EXIT!")
-            await _notify(await execute_sell(pos["id"], 1.0, "rug"))
-        except Exception as e:
-            await _notify(f"⚠️ Emergency exit {pos['symbol']} GAGAL (LP mungkin sudah kosong): {e}")
-        return
+        # Verifikasi dulu apakah pool on-chain memang terkuras, atau cuma
+        # glitch/delay API Dexscreener (liq usang). Quote jual on-chain
+        # dibandingkan dengan nilai spot yang diharapkan.
+        is_real_rug = True
+        if _trader and (pos.get("tokens_left") or 0) > 0:
+            try:
+                token = _trader.erc20(pos["ca"])
+                dec = await asyncio.to_thread(token.functions.decimals().call)
+                amt_raw = int(pos["tokens_left"] * 10**dec)
+                if amt_raw > 0:
+                    q_eth = await asyncio.to_thread(
+                        _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
+                        pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
+                    # Jika quote on-chain masih > 50% dari expected spot →
+                    # false alarm Dexscreener, pool on-chain masih tebal.
+                    expected_eth = pos["tokens_left"] * float(pair.get("priceNative") or 0)
+                    if expected_eth > 0 and q_eth >= expected_eth * 0.5:
+                        is_real_rug = False
+                        print(f"[engine] Rug alert diabaikan untuk "
+                              f"{pos['symbol']}: quote on-chain masih sehat "
+                              f"({q_eth:.6f} ETH vs exp {expected_eth:.6f} ETH)")
+            except Exception:
+                pass
+        if is_real_rug:
+            try:
+                _liq_last.pop(pos["id"], None)
+                _thin_warned.discard(pos["id"])
+                await _notify(
+                    f"🚨 **{pos['symbol']}** liq anjlok ${last_liq:,.0f} → ${liq:,.0f} "
+                    f"({(liq/last_liq-1)*100:.0f}%) — EMERGENCY EXIT!")
+                await _notify(await execute_sell(pos["id"], 1.0, "rug"))
+            except Exception as e:
+                await _notify(f"⚠️ Emergency exit {pos['symbol']} GAGAL (LP mungkin sudah kosong): {e}")
+            return
 
     pnl = price / pos["entry_price_usd"] - 1
     tp1_v = pos.get("tp1_x") or db.get("tp1")
