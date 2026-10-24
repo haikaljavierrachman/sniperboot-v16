@@ -229,12 +229,12 @@ def goldilocks_eval(pair) -> tuple[bool, str, dict]:
     quoter diverifikasi di _fastpath_gate (butuh I/O on-chain).
     """
     now_ms = time.time() * 1000
-    min_age = float(db.get("goldilocks_min_age_sec", float) or 30)
+    min_age = float(db.get("goldilocks_min_age_sec", float) or 10)
     max_age = float(db.get("goldilocks_max_age_sec", float) or 180)
     min_liq = float(db.get("goldilocks_min_liq", float) or 4000.0)
     min_ratio = float(db.get("goldilocks_min_liq_mcap_ratio", float) or 0.35)
-    max_mcap = float(db.get("goldilocks_max_mcap", float) or 28000.0)
-    min_mcap = float(db.get("goldilocks_min_mcap", float) or 7000.0)
+    max_mcap = float(db.get("goldilocks_max_mcap", float) or 35000.0)
+    min_mcap = float(db.get("goldilocks_min_mcap", float) or 5000.0)
 
     # ---- a. umur pool (pairCreatedAt milidetik) ----
     created = pair.get("pairCreatedAt")
@@ -280,8 +280,8 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         print(f"[fast-safety] {ca[:10]}: {reason}")
         return False, "dev_terlalu_besar", {}
     # batas dev/top10 ketat versi Goldilocks (rasio, bukan persen)
-    max_dev = float(db.get("goldilocks_max_dev_pct", float) or 0.03)
-    max_top = float(db.get("goldilocks_max_top10_pct", float) or 0.25)
+    max_dev = float(db.get("goldilocks_max_dev_pct", float) or 0.04)
+    max_top = float(db.get("goldilocks_max_top10_pct", float) or 0.30)
     dev = safety.dev_pct(_trader, ca)          # persen (0-100)
     if dev and dev / 100.0 > max_dev:
         return False, "dev_terlalu_besar", {}
@@ -296,7 +296,7 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         return False, tag, metr
     liq, mcap, pool_age = metr["liq"], metr["mcap"], metr["pool_age"]
 
-    # ---- d. zero-gas on-chain quoter (slippage ≤ 15% + mcap on-chain) ----
+    # ---- d. zero-gas on-chain quoter (slippage ≤ 25% + mcap on-chain) ----
     buy_usd = db.get("buy_usd")
     eth_price = dx.eth_usd(pair)
     eth_spent = buy_usd / eth_price if eth_price > 0 else 0
@@ -315,7 +315,7 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         dec = 18
     price_native = float(pair.get("priceNative") or 0)
     expected_tokens = (eth_spent / price_native) if price_native > 0 else 0
-    max_slip = float(db.get("goldilocks_max_slippage", float) or 0.15)
+    max_slip = float(db.get("goldilocks_max_slippage", float) or 0.25)
     min_out_raw = int(expected_tokens * (1.0 - max_slip) * (10 ** dec)) \
         if expected_tokens > 0 else 0
     try:

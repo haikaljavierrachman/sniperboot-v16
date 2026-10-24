@@ -113,11 +113,11 @@ check("default entry_mode = mata",
 
 
 # =====================================================================
-print("\n[2] umur pool Goldilocks (min 30s, maks 180s)")
+print("\n[2] umur pool Goldilocks (min 10s, maks 180s)")
 db.set_("entry_mode", "fast")
-ok, tag, m = goldilocks_eval(pair(age_s=10))
-check("umur 10s (< 30s) → skip", not ok and tag.startswith("age_")
-      and abs(m["pool_age"] - 10.0) < 3.0, f"tag={tag}")
+ok, tag, m = goldilocks_eval(pair(age_s=5))
+check("umur 5s (< 10s) → skip", not ok and tag.startswith("age_")
+      and abs(m["pool_age"] - 5.0) < 3.0, f"tag={tag}")
 ok, tag, m = goldilocks_eval(pair(age_s=300))
 check("umur 300s (> 180s, koin basi) → skip", not ok
       and tag.startswith("age_") and abs(m["pool_age"] - 300.0) < 2,
@@ -143,14 +143,14 @@ p = dict(pair(age_s=60), liquidity={"usd": 3500.0}, marketCap=9000.0)
 ok, tag, _ = goldilocks_eval(p)
 check("liq $3.500 (< $4.000) → skip liq_rendah", not ok and tag == "liq_rendah",
       tag)
-# mcap di luar jendela: 6000 < 7000 / 30000 > 28000
-p = dict(pair(age_s=60), marketCap=6000.0)
+# mcap di luar jendela: 4000 < 5000 / 40000 > 35000
+p = dict(pair(age_s=60), marketCap=4000.0)
 ok, tag, _ = goldilocks_eval(p)
-check("mcap $6.000 (< $7.000) → skip mcap_out_of_range",
+check("mcap $4.000 (< $5.000) → skip mcap_out_of_range",
       not ok and tag == "mcap_out_of_range", tag)
-p = dict(pair(age_s=60), marketCap=30000.0)
+p = dict(pair(age_s=60), marketCap=40000.0)
 ok, tag, _ = goldilocks_eval(p)
-check("mcap $30.000 (> $28.000) → skip mcap_out_of_range",
+check("mcap $40.000 (> $35.000) → skip mcap_out_of_range",
       not ok and tag == "mcap_out_of_range", tag)
 
 
@@ -197,12 +197,12 @@ class QuoterOkEarly(FakeTrader):
 
 listener._trader = QuoterOkEarly()
 ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
-check("dev 2% (<= 3%) → lolos", ok and tag == "", f"tag={tag}")
+check("dev 2% (<= 4%) → lolos", ok and tag == "", f"tag={tag}")
 
-# 4b: dev 5% (> 3% Goldilocks) → skip
+# 4b: dev 5% (> 4% Goldilocks) → skip
 listener.safety.dev_pct = lambda tr, ca: 5.0
 ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
-check("dev 5% (> 3%) → skip dev_terlalu_besar",
+check("dev 5% (> 4%) → skip dev_terlalu_besar",
       not ok and tag == "dev_terlalu_besar", tag)
 
 # 4c: safety.check menolak (honeypot) → skip
@@ -214,13 +214,13 @@ check("honeypot → skip dev_terlalu_besar (gate safety)",
 
 
 # =====================================================================
-print("\n[5] slippage quoter > 15% → skip (via _fastpath_gate)")
+print("\n[5] slippage quoter > 25% → skip (via _fastpath_gate)")
 listener.safety.check = lambda tr, ca, p: (True, "ok")
 listener.safety.dev_pct = lambda tr, ca: 0.0
 listener.safety.top_holders_pct = lambda tr, ca, ex, n=10: 10.0
 
 # harga layar 0.001 / native 0.0005 → eth_price 2 → buy $5 = 2.5 ETH →
-# expected 5000 token; min_out 15% = 4250 token. quote 3000 < 4250 → slip.
+# expected 5000 token; min_out 25% = 3750 token. quote 3000 < 3750 → slip.
 class QuoterSlip(FakeTrader):
     def erc20(self, addr_):
         return Dec18ERC20(addr_)
@@ -231,7 +231,7 @@ class QuoterSlip(FakeTrader):
 
 listener._trader = QuoterSlip()
 ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
-check("quote < ambang 15% → skip slippage_besar",
+check("quote < ambang 25% → skip slippage_besar",
       not ok and tag == "slippage_besar", tag)
 
 
@@ -349,15 +349,15 @@ check("mode fast: notif FAST-PATH BUY terkirim",
 
 # =====================================================================
 print("\n[7] default settings Goldilocks masuk DB")
-for k, exp in (("goldilocks_min_age_sec", 30.0),
+for k, exp in (("goldilocks_min_age_sec", 10.0),
                ("goldilocks_max_age_sec", 180.0),
                ("goldilocks_min_liq", 4000.0),
                ("goldilocks_min_liq_mcap_ratio", 0.35),
-               ("goldilocks_max_mcap", 28000.0),
-               ("goldilocks_min_mcap", 7000.0),
-               ("goldilocks_max_dev_pct", 0.03),
-               ("goldilocks_max_top10_pct", 0.25),
-               ("goldilocks_max_slippage", 0.15),
+               ("goldilocks_max_mcap", 35000.0),
+               ("goldilocks_min_mcap", 5000.0),
+               ("goldilocks_max_dev_pct", 0.04),
+               ("goldilocks_max_top10_pct", 0.30),
+               ("goldilocks_max_slippage", 0.25),
                ("goldilocks_tp1", 0.35),
                ("goldilocks_tp2", 0.80)):
     check(f"DB {k} = {exp}", abs(db.get(k, float) - exp) < 1e-9,

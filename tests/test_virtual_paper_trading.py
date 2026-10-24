@@ -310,8 +310,8 @@ check("SL -30%: $5 modal → balik net(3.50*0.99 − gas)",
 # integrasi: kas virtual terpotong saat open posisi simulasi via listener path
 db.reset_paper_cash(100.0)
 check("SETTING_DEFAULTS punya paper_initial_usd & paper_cash_usd",
-      config.SETTING_DEFAULTS.get("paper_initial_usd") == "100.0"
-      and config.SETTING_DEFAULTS.get("paper_cash_usd") == "100.0")
+      config.SETTING_DEFAULTS.get("paper_initial_usd") == "20.0"
+      and config.SETTING_DEFAULTS.get("paper_cash_usd") == "20.0")
 p3 = make_pair(0.001, 0.0005, addr="ef")
 cash_before = db.get_paper_cash()
 pid3 = open_sim_position(p3, dec)

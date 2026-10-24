@@ -126,21 +126,21 @@ SETTING_DEFAULTS = {
     # ---- 🔄 Rotasi wallet insider (v16.3): prune boncos + rekrut dari runner ----
     "tracker_auto_rotate":   "1",
     # ---- 🧪 Dompet kas virtual (paper trading mode latihan) ----
-    "paper_initial_usd": "100.0",
-    "paper_cash_usd":    "100.0",
+    "paper_initial_usd": "20.0",
+    "paper_cash_usd":    "20.0",
     # ---- ⚡ FAST-PATH Goldilocks Defensive (entry tanpa LLM) ----
     # entry_mode: 'mata' = MATA (LLM memutuskan), 'fast' = evaluasi murni
     # matematika/bytecode (0 detik LLM). Toggle via panel 🧠 Otak.
     "entry_mode":                 "mata",
-    "goldilocks_min_age_sec":     "30",
+    "goldilocks_min_age_sec":     "10",
     "goldilocks_max_age_sec":     "180",
     "goldilocks_min_liq":         "4000.0",
     "goldilocks_min_liq_mcap_ratio": "0.35",
-    "goldilocks_max_mcap":        "28000.0",
-    "goldilocks_min_mcap":        "7000.0",
-    "goldilocks_max_dev_pct":     "0.03",
-    "goldilocks_max_top10_pct":   "0.25",
-    "goldilocks_max_slippage":    "0.15",
+    "goldilocks_max_mcap":        "35000.0",
+    "goldilocks_min_mcap":        "5000.0",
+    "goldilocks_max_dev_pct":     "0.04",
+    "goldilocks_max_top10_pct":   "0.30",
+    "goldilocks_max_slippage":    "0.25",
     "goldilocks_tp1":             "0.35",
     "goldilocks_tp2":             "0.80",
     # ---- 📡 Userbot Telegram (alpha groups listener) — 100% OPSIONAL ----
