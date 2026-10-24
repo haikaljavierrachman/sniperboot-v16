@@ -61,7 +61,7 @@ Respond with ONLY a JSON object:
 
 Be conservative: SELL actions execute real trades. Only sell when the data clearly says momentum is gone or risk spiked. In "reason", cite the actual numbers behind the call (pnl, price change, buy/sell flow) as 1-2 short clauses separated by '; ' — no number, no claim."""
 
-LESSONS_SYSTEM = """You analyze closed trades of a meme token sniper and extract at most 3 short, concrete, actionable lessons (bahasa Indonesia). Respond ONLY with a JSON array of strings, e.g. ["...", "..."]. No prose."""
+LESSONS_SYSTEM = """You analyze closed trades of a meme token sniper and extract at most 3 short, concrete, actionable lessons (bahasa Indonesia). Respond ONLY with a valid JSON array of strings, e.g. ["pelajaran 1", "pelajaran 2"]. Do not output thinking or prose."""
 
 
 
@@ -407,12 +407,37 @@ def review_position(pos, pair):
 
 
 # ---------- lessons ----------
+def _lessons_from_bullets(text):
+    """Fallback: petik pelajaran dari daftar poin saat _parse_json gagal total
+    (model menjawab berupa bullet/numbered list, bukan JSON)."""
+    if not text:
+        return []
+    import re
+    out = []
+    for m in re.finditer(r"^\s*(?:\d+[\.\)]|[-*•])\s*(.+)$", text, re.MULTILINE):
+        t = m.group(1).strip()
+        # buang penanda markdown yang tersisa (mis. "**pelajaran**")
+        t = t.strip("*_`").strip()
+        if t:
+            out.append(t)
+    return out
+
+
 def derive_lessons():
     closed = db.closed_positions_with_decisions(20)
     if len(closed) < 5:
         return []
-    raw = _call(LESSONS_SYSTEM, json.dumps(closed), 800)
-    items = _parse_json(raw)
+    # 2000 token: prompt 15-20 posisi closed itu panjang, dan via 9router
+    # (DeepSeek/GLM) anggaran 800 terpotong di tengah array JSON — sumber
+    # ValueError "tidak ada JSON di respons LLM" (lapangan 2026-10-23).
+    raw = _call(LESSONS_SYSTEM, json.dumps(closed), 2000)
+    try:
+        items = _parse_json(raw)
+    except ValueError:
+        # model menjawab berupa daftar poin bahasa Indonesia → petik manual
+        items = _lessons_from_bullets(raw)
+    if not isinstance(items, list):
+        items = _lessons_from_bullets(raw)
     out = []
     for t in items[:3]:
         t = str(t).strip()[:300]
