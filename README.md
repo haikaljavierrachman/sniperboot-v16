@@ -1,102 +1,101 @@
-# hoodsniper 🤖
+# Hoodsniper v16.4 🤖⚡
 
-> 📖 **Panduan lengkap ada di [PANDUAN.md](PANDUAN.md)** — baca itu untuk setup detail, penjelasan tiap menu, rollout, dan troubleshooting. README ini ringkasan cepat.
+Autonomous On-Chain Sniper & Multi-DEX Trading Bot untuk **Robinhood Chain (Chain ID `4663`)**. Dilengkapi arsitektur hybrid: **Audit Bytecode Deterministik + Zero-Gas On-Chain Quoter + AI Reasoning (MATA & TANGAN) + Mobile Telegram Control Panel**.
 
-Multi-group meme sniper di **Robinhood Chain** dengan control panel gaya trading bot.
+---
 
-**Arsitektur hybrid:**
-- 👂 **Telinga** — akun Telegram Kakak sendiri (Telethon, login QR). Bisa baca semua room yang Kakak sudah jadi member, **tanpa add bot apapun ke group**.
-- 🎛 **Remote** — bot BotFather sebagai control panel: inline keyboard, panel posisi dengan PnL live, tombol sell manual, atur sources & settings dari HP tanpa SSH.
+## ⚡ Cara Kerja Bot (Alur Pipeline Eksekusi)
 
-## Fitur
+```
+[Sumber Sinyal]
+  ├── Factory Events (v2, v3, v4 via eth_getLogs)
+  ├── Smart Money Tracker (55 Insider Wallets Copy-Trade)
+  ├── Pending Pool Retry Queue (Anti-Stale Index Dexscreener)
+  └── Telegram Listener (Telethon Userbot Alpha Groups)
+          │
+          ▼
+[Lapisan 1: Pagar Keras Pre-Buy (0.05s)]
+  ├── Filter Market Cap: $7.000 – $45.000 (Anti-Pucuk)
+  ├── Filter Likuiditas: Min $2.000 (Rasio Liq/Mcap Sehat)
+  ├── Audit Bytecode EVM: Deteksi fungsi mint(), blacklist(), setFee() tersembunyi
+  └── Audit Holder: Dev max 5%, Top 10 non-pool max 40% (via Blockscout)
+          │
+          ▼
+[Lapisan 2: Kecerdasan Buatan — MATA (LLM)]
+  ├── Evaluasi Momentum: Volume flow (buys vs sells), pool age, pump vertikal
+  └── Dynamic Sizing: Tentukan size modal (0.5x – 1.0x) & target TP/SL kustom
+          │
+          ▼
+[Lapisan 3: Zero-Gas On-Chain Quoter (Detik Eksekusi)]
+  ├── Simulasi eth_call langsung ke Sequencer (Tanpa Gas)
+  │     ├── Uniswap v4 : V4Quoter.quoteExactInputSingle + StateView
+  │     ├── Uniswap v3 : SwapRouter02
+  │     └── Uniswap v2 : Router2.getAmountsOut
+  ├── Pagar Slippage: Tolak jika harga sudah lari > 60%
+  └── Pagar Mcap Riil: Tolak jika Mcap On-Chain > $45.000 (Terkunci oleh sniper lain)
+          │
+          ▼
+[Lapisan 4: Eksekusi Swap & Posisi]
+  ├── Live Mode     : Kirim Raw Transaction (UniversalRouter / SwapRouter)
+  └── Latihan Mode  : Virtual Paper Trading presisi tinggi (Potong gas $0.12 + slip 1%)
+          │
+          ▼
+[Lapisan 5: Mesin Penjaga Posisi (Loop Matematika Tiap 20s)]
+  ├── TP1 Scale-Out : Jual 50% di +35% / +50% (Modal aman di kantong)
+  ├── Breakeven SL  : Sisa moonbag terkunci minimal di harga modal (0% risk)
+  ├── TP2 Target    : Kunci profit bersih di +80% / +100%
+  ├── Trailing ATH  : Kunci cuan jika grafik turun -15% dari titik puncak (ATH)
+  ├── Hard Rug Exit : Auto-sell seketika jika likuiditas pool dicabut dev
+  └── TANGAN (AI)   : Review berkala tiap 10 menit untuk cut-loss posisi basi
+```
 
-- **Multi-group / multi-topic** — tambah source sebanyak apapun, tiap source punya limit mcap sendiri. Tambah/hapus/on-off langsung dari bot, tanpa restart.
-- **Panel posisi live** — PnL realtime per posisi, tombol `Sell 50%` / `Sell ALL` / link chart Dexscreener.
-- **Settings via bot** — buy size, TP1/TP2/SL, slippage, min liquidity, interval — semua bisa diedit dari chat.
-- **Pause/Resume** — stop entry sementara tanpa matiin proses.
-- **Stats** — jumlah call, buy, TP/SL, estimasi PnL realized.
-- **Auto TP/SL** — jual 50% di +50%, sisa di +100%, cut semua di -30% (default, bisa diubah).
-- **Honeypot check** — simulasi sell setelah buy, alert kalau gagal.
-- **Safety filter pre-buy** — skip token kalau dev pegang > 5% supply, atau top-10 holders (di luar pool/burn/dev) pegang > 40%. Data deployer & holders dari Blockscout Robinhood Chain. Threshold & on/off diatur dari ⚙️ Settings.
-- Notif buy dilengkapi tombol sell langsung — lihat call masuk, satu tap buat exit.
+---
 
-## Agent mode (opsional) 🧠
+## 🛠 Fitur Utama
 
-Multi-provider: isi `LLM_PROTOCOL`, `LLM_API_KEY`, `LLM_BASE_URL` di `.env` (default Anthropic; protokol `openai` mendukung OpenAI/DeepSeek/GLM/Kimi/Qwen/OpenRouter/9router/LM Studio — contoh lengkap di `.env.example`), lalu nyalakan dari menu **🧠 Agent** di bot. Nama model diganti dari panel Agent, harus cocok dengan provider yang dipakai. Dua role:
+- **Dukungan Multi-DEX Penuh**:
+  - **Uniswap v4**: UniversalRouter (`0x8876...0904`), StateView (`0x0284...55F2`), V4Quoter (`0xdF8B...1867`).
+  - **Uniswap v3**: SwapRouter02 & Tick Fee decoding.
+  - **Uniswap v2**: Router2 getAmountsOut & Fee-on-transfer support.
+- **Konkurensi Cepat & Ringan**:
+  - `Batch 2` + `asyncio.Semaphore(2)` memangkas jeda antrean dari 30s menjadi 6s tanpa membebani rate limit RPC.
+  - RAM VPS super hemat: konsisten $\le$ 120 MB.
+- **Realistic Virtual Paper Trading**:
+  - Mensimulasikan kondisi riil blockchain: gas sequencer L2 ($0.12 per swap), spread eksekusi DEX 1%, dan harga live On-Chain Quoter (bukan ilusi harga layar Dexscreener).
+- **Mobile Telegram Control Panel**:
+  - Atur modal, TP/SL, slippage, refresh data, switch latihan/live, pantau grafik posisi, dan intervensi manual (Sell 50% / Sell ALL) langsung dari Telegram.
 
-- **Screener** — tiap call yang lolos hard filter dikirim ke Claude beserta konteks: momentum (volume/price change/buys-vs-sells 5m & 1h), umur pool, hasil safety check, track record room, keputusan terakhir, dan lessons. Claude balas keputusan terstruktur: BUY/SKIP, conviction, size multiplier, dan TP/SL khusus posisi itu — semua di-clamp dalam pagar (max multiplier, rentang TP/SL).
-- **Manager** — tiap N menit review posisi terbuka: momentum mati di +20%? exit duluan. Trend kuat? hold. TP/SL deterministik tetap jalan sebagai backstop.
+---
 
-Fitur:
-- **Dry run default ON** — agent kasih keputusan tanpa eksekusi, buat validasi dulu sebelum live.
-- **Decision log** — semua keputusan + alasan tercatat, lihat via 📜 di panel Agent; outcome (tp2/sl) ditulis balik ke keputusan asalnya.
-- **Lessons** — dari ≥5 posisi closed, agent menurunkan max 3 pelajaran konkret yang di-inject ke prompt berikutnya (tombol 🧠 Derive lessons).
-- Model default `claude-haiku-4-5` (cepat & murah); bisa diganti dari panel.
-- Kalau API error/timeout → **fallback ke rule-based**, entry tetap jalan pakai rule lama.
+## 🚀 Setup Cepat
 
-## Setup
+### 1. Prasyarat
+- Python 3.11+
+- Node.js (opsional untuk helper)
+- Akun Telegram (API ID & Hash dari `my.telegram.org`)
+- Bot Telegram (Token dari `@BotFather`)
 
+### 2. Instalasi
 ```bash
-cd hoodsniper2
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
+git clone git@github.com:irf4an/sniperboot-v16.git
+cd sniperboot-v16
+pip install -r requirements.txt
+cp .env.example .env
+```
 
-# alamat Uniswap chain 4663
-npm i @uniswap/sdk-core
-node tools/fetch_addresses.mjs      # copy hasilnya ke .env
+### 3. Konfigurasi (.env)
+Isi variabel pada `.env` (private key burner, token Telegram, admin ID, dan URL LLM jika mode AI aktif).
 
-# bikin control bot
-# 1. chat @BotFather → /newbot → copy token → BOT_TOKEN di .env
-# 2. chat @userinfobot → copy user id → ADMIN_ID di .env
-#    (cuma ADMIN_ID yang bisa mengontrol bot; orang lain di-reject)
+### 4. Menjalankan
+```bash
+# Jalankan langsung
+python3 bot.py
 
-cp .env.example .env && nano .env   # isi PRIVATE_KEY, API ID/hash, token, admin id
-
-# login akun Telegram (QR) — sekali saja
-./venv/bin/python bot.py login
-
-# jalankan
+# Atau via PM2 (rekomendasi VPS)
 pm2 start ecosystem.config.js
-pm2 save && pm2 startup
 ```
 
-Lalu buka bot Kakak di Telegram → `/start` → panel muncul.
+---
 
-> ⚠️ Kirim `/start` ke bot minimal sekali — bot Telegram tidak bisa memulai chat duluan.
-
-## Menu bot
-
-```
-🤖 hoodsniper v2
-status: ▶️ AKTIF
-👛 0xAbC…       ⛽ 0.045 ETH
-📊 open: 3      📡 sources: 2
-
-[📊 Posisi]  [📡 Sources]
-[⚙️ Settings] [📈 Stats]
-[⏸ Pause]    [🔄 Refresh]
-```
-
-**Tambah source** (dari menu 📡 Sources → ➕):
-```
-https://t.me/c/2103131992/250551 30000 Degen Hood
--1001234567890 15000 Alpha Group
-```
-Format: `<link_topic_atau_chat_id> <mcap_max> <nama>`. Paste link topic `t.me/c/...` langsung — chat id & topic id di-parse otomatis. Tanpa topic = semua message di group dipantau. Syaratnya cuma satu: **akun Kakak harus sudah member group itu.**
-
-Source lama (Degen Room $30k + RH Member Call $10k) otomatis ke-seed saat pertama jalan.
-
-## Catatan
-
-- **Wallet agent terpisah**, isi secukupnya. `chmod 600 .env`. Anggap dana di dalamnya siap hangus — call low cap 90% rug.
-- **Rate limit**: makin banyak source ber-volume tinggi, makin sering hit Dexscreener & RPC. Kalau mulai error 429, ganti `RPC_URL` ke endpoint dedicated dan naikkan `poll_seconds`.
-- **File penting**: `hoodsniper.session`, `hoodsniper_bot.session`, `hoodsniper.db` — backup kalau pindah VPS, jangan commit ke git.
-- Dedupe global per CA — token yang sama di-call dua room berbeda cuma dibeli sekali.
-
-## Perintah VPS
-
-```bash
-pm2 logs hoodsniper          # log realtime (termasuk [skip])
-pm2 restart hoodsniper
-sqlite3 hoodsniper.db "SELECT symbol,status,realized_eth FROM positions;"
-```
+## ⚖️ Lisensi & Keamanan
+Khusus untuk riset dan otomatisasi pada aset terotorisasi. Selalu gunakan **burner wallet terpisah** dengan saldo terbatas.
