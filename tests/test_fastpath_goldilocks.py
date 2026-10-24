@@ -191,6 +191,13 @@ class QuoterOkEarly(FakeTrader):
                         def call(self):
                             return 25_000_000 * 10**18
                     return G()
+
+                @staticmethod
+                def balanceOf(addr):
+                    class B:
+                        def call(self):
+                            return 0
+                    return B()
         return E()
 
     def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
@@ -253,6 +260,76 @@ class QuoterRunner(FakeTrader):
         # min_out DIBIARKAN 0 — quoter benci min_out dari harga layar basi
         assert min_out == 0, f"spot probe harus min_out=0, dapat {min_out}"
         return True, self.amt * 10**18, ""
+
+
+# =====================================================================
+print("\n[5b] BURNED SUPPLY — circulating supply (dEaD dikecualikan)")
+# Skenario DIFC/YMB: totalSupply 1 Miliar, 77.2% dibakar ke 0x000...dEaD.
+# Entry $5 ambil 33.378 token → harga ~$0.0001498;
+#   mcap FDV mentah  = 0.0001498 × 1.000.000.000 = $149.800 (PUCUK)
+#   mcap circulating = 0.0001498 × 228.483.516  = $34.226 (LOLOS ≤ 35k)
+DEAD = "0x000000000000000000000000000000000000dEaD"
+
+
+class QuoterBurned(FakeTrader):
+    def __init__(self, supply=1_000_000_000, burned=771_516_484, amt=33_378):
+        self.supply = supply
+        self.burned = burned
+        self.amt = amt
+
+    def erc20(self, addr_):
+        tr = self
+        class E:
+            class functions:
+                @staticmethod
+                def decimals():
+                    class F:
+                        def call(self):
+                            return 18
+                    return F()
+
+                @staticmethod
+                def totalSupply():
+                    class G:
+                        def call(self):
+                            return tr.supply * 10**18
+                    return G()
+
+                @staticmethod
+                def balanceOf(addr):
+                    bal = tr.burned if str(addr).lower() == DEAD.lower() else 0
+                    class B:
+                        def call(self):
+                            return bal * 10**18
+                    return B()
+        return E()
+
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+        # DIFC-style: $5 ambil 33.378 token → harga ~$0.0001498
+        return True, self.amt * 10**18, ""
+
+
+listener._trader = QuoterBurned()
+ok, tag, metr = asyncio.run(_fastpath_gate(CA, p_ok))
+_mcap_benar = 0.0001498 * 228_483_516  # ~$34.226
+check("burn 77.2% → mcap dihitung dari 228.483.516 (≈$34.2k) → LOLOS, BUKAN 1 Miliar",
+      ok and tag == ""
+      and abs(metr.get("mcap_onchain", 0) - _mcap_benar) < 1.0,
+      f"tag={tag} mcap_onchain={metr.get('mcap_onchain')}")
+check(" supply yang dipakai bukan totalSupply mentah (kalaupun FDV 1 Miliar → $149.8k)",
+      _mcap_benar < 149_800 * 0.25, f"mcap_benar={_mcap_benar}")
+
+
+class QuoterBurned2(QuoterBurned):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+        return True, 5000 * 10**18, ""
+
+listener._trader = QuoterBurned2(supply=25_000_000, burned=0)
+ok, tag, metr = asyncio.run(_fastpath_gate(CA, p_ok))
+check("tanpa burn, supply 25jt, entry $0.001 → mcap $25k → LOLOS",
+      ok and tag == ""
+      and abs(metr.get("mcap_onchain", 0) - 25_000.0) < 1.0,
+      f"tag={tag} mcap_onchain={metr.get('mcap_onchain')}")
 
 
 listener._trader = QuoterRunner()

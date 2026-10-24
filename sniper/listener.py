@@ -329,15 +329,42 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
     tokens_total = amt_raw / (10 ** dec)
     entry_price_usd = (db.get("buy_usd") / tokens_total) if tokens_total > 0 else 0
     total_supply = None
+    circulating_supply = None
     try:
-        supply_raw = await asyncio.to_thread(_trader.erc20(ca).functions.totalSupply().call)
+        token_contract = _trader.erc20(ca)
+        supply_raw = await asyncio.to_thread(
+            token_contract.functions.totalSupply().call)
         total_supply = supply_raw / (10 ** dec)
+
+        # Kurangi burned tokens (dead & zero address) → circulating supply.
+        # Token meme di Robinhood Chain sering membakar ~77% supply at
+        # deploy; totalSupply mentah membuat mcap on-chain membengkak ~4.4x
+        # dan koin bagus salah di-tolak sebagai 'mcap_onchain_pucuk'.
+        burned_raw = 0
+        for dead_addr in (
+            "0x000000000000000000000000000000000000dEaD",
+            "0x0000000000000000000000000000000000000000",
+        ):
+            try:
+                bal = await asyncio.to_thread(
+                    token_contract.functions.balanceOf(dead_addr).call)
+                burned_raw += int(bal or 0)
+            except Exception:
+                pass
+        circ_raw = max(0, supply_raw - burned_raw)
+        if circ_raw > 0:
+            circulating_supply = circ_raw / (10 ** dec)
     except Exception:
         total_supply = None
-    if not total_supply or total_supply <= 0:
+        circulating_supply = None
+    if not circulating_supply or circulating_supply <= 0:
+        # Fallback estimasi dari supply beredar Dexscreener (mcap pada
+        # Dexscreener memakai circulating supply, bukan FDV).
+        pair_mcap = float(pair.get("marketCap") or 0)
         pair_price = float(pair.get("priceUsd") or 0)
-        total_supply = (mcap / pair_price) if pair_price > 0 else 1_000_000_000
-    mcap_onchain = entry_price_usd * total_supply
+        circulating_supply = (pair_mcap / pair_price) \
+            if (pair_price > 0 and pair_mcap > 0) else 1_000_000_000
+    mcap_onchain = entry_price_usd * circulating_supply
     # ---- GUARD NYATA ADALAH MARKET CAP (anti-pucuk) ----
     # Harga on-chain berada di rentang aman? Perbedaan harga layar
     # Dexscreener vs on-chain BUKAN slippage — koin runner di jendela
@@ -594,21 +621,40 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         # entry quote on-chain × total supply on-chain; tolak bila sudah
         # melewati batas keras (dipompa sniper lain).
         total_supply_tokens = None
+        circulating_supply_tokens = None
         try:
             # pakai kontrak ERC20 yang sudah dibuat untuk decimals di atas
             _erc20 = _trader.erc20(ca)
             supply_raw = await asyncio.to_thread(
                 _erc20.functions.totalSupply().call)
             total_supply_tokens = supply_raw / (10 ** dec)
+
+            # Kurangi tokens terbakar (dead & zero address) — supply
+            # beredar riil, sama seperti perhitungan Dexscreener.
+            burned_raw = 0
+            for dead_addr in (
+                "0x000000000000000000000000000000000000dEaD",
+                "0x0000000000000000000000000000000000000000",
+            ):
+                try:
+                    _bal = await asyncio.to_thread(
+                        _erc20.functions.balanceOf(dead_addr).call)
+                    burned_raw += int(_bal or 0)
+                except Exception:
+                    pass
+            circ_raw = max(0, supply_raw - burned_raw)
+            if circ_raw > 0:
+                circulating_supply_tokens = circ_raw / (10 ** dec)
         except Exception:
             total_supply_tokens = None
-        if not total_supply_tokens or total_supply_tokens <= 0:
-            # fallback estimasi dari pair Dexscreener
+            circulating_supply_tokens = None
+        if not circulating_supply_tokens or circulating_supply_tokens <= 0:
+            # fallback estimasi circulating supply dari pair Dexscreener
             pair_mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
             pair_price = float(pair.get("priceUsd") or 0)
-            total_supply_tokens = (pair_mcap / pair_price) \
-                if pair_price > 0 else 1_000_000_000
-        mcap_onchain = entry_price_usd * total_supply_tokens
+            circulating_supply_tokens = (pair_mcap / pair_price) \
+                if (pair_price > 0 and pair_mcap > 0) else 1_000_000_000
+        mcap_onchain = entry_price_usd * circulating_supply_tokens
         mcap_max = float(db.get("scanner_mcap_max", float)
                          or 0) or float(src.get("mcap_max") or 45000)
         if mcap_onchain > mcap_max:
