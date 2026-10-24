@@ -6,7 +6,7 @@ runner baru melahirkan insider baru. Skrip ini (dipanggil CLI maupun
 diimpor oleh tracker.auto_rotation_loop tiap 24 jam) menjalankan 3 tahap:
 
   1. PRUNE — wallet boncos/lunglai dinonaktifkan (db.prune_stale_insiders):
-     last_seen > 0, tak aktif > 14 hari, win_count < 2 → enabled = 0.
+     last_seen > 0, tak aktif > 3 hari, win_count < 2 → enabled = 0.
   2. HARVEST — ambil koin runner terbaru (Dexscreener search Robinhood),
      petik pembeli awal (Blockscout transfers → pick_buyers).
   3. RECRUIT — irisan silang wallet yang terbentur ≥2 koin pemenang
@@ -33,7 +33,7 @@ from sniper import db  # noqa: E402
 import tools.screen_insiders as si  # noqa: E402
 
 DEFAULT_RUNNER_LIMIT = 15
-DEFAULT_MAX_INACTIVE_DAYS = 14
+DEFAULT_MAX_INACTIVE_DAYS = 3
 
 
 def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
@@ -93,7 +93,7 @@ def main():
     ap.add_argument("--limit", type=int, default=DEFAULT_RUNNER_LIMIT,
                     help=f"max koin runner (default {DEFAULT_RUNNER_LIMIT})")
     ap.add_argument("--days", type=int, default=DEFAULT_MAX_INACTIVE_DAYS,
-                    help="maks hari tak aktif sebelum di-prune (default 14)")
+                    help="maks hari tak aktif sebelum di-prune (default 3)")
     ap.add_argument("--dry-run", action="store_true",
                     help="tampil saja, tidak menulis DB")
     args = ap.parse_args()

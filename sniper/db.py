@@ -559,9 +559,10 @@ def record_insider_result(address: str, won: bool) -> dict:
         return {"address": address, "action": "loss", "disabled": False}
 
 
-def prune_stale_insiders(max_inactive_days: int = 14) -> int:
+def prune_stale_insiders(max_inactive_days: int = 3) -> int:
     """Nonaktifkan wallet insider yang lama tak terlihat ATAU terbukti
-    boncos: last_seen > 0 dan tak aktif >= max_inactive_days hari, dengan
+    boncos: last_seen > 0 dan tak aktif >= max_inactive_days hari (default
+    3 hari / 72 jam — memcoin exit liquiditas cepat), dengan
     win_count < 2 (skor belum layak). Return jumlah yang dinonaktifkan."""
     cutoff = int(time.time()) - max_inactive_days * 86400
     with _lock, _conn() as c:
