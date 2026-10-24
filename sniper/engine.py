@@ -178,6 +178,10 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     elif reason == "trail":
         db.update_position(pos_id, tokens_left=0, status="closed_trail", closed_at=now)
         text = f"📈🔒 **TRAILING STOP** {tag}\nprofit diamankan dari puncak:\n{nums}\nposisi CLOSED{warn}"
+    elif reason == "timeout":
+        db.update_position(pos_id, tokens_left=0, status="closed_timeout", closed_at=now)
+        text = (f"⏱️ **TIME STOP (TIMEOUT {int((now - pos['ts'])/60)}m)** {tag}\n"
+                f"tidak tembus TP dalam batas waktu:\n{nums}\nposisi CLOSED{warn}")
     else:
         if fraction >= 1 or left <= 0:
             db.update_position(pos_id, tokens_left=0, status="closed_manual", closed_at=now)
@@ -229,6 +233,22 @@ async def _check(pos):
     if price <= 0:
         return
     liq = float((pair.get("liquidity") or {}).get("usd") or 0)
+
+    # ---------- 0) TIME STOP: max hold 20 menit (1200 dtk, 0 = off) ----------
+    # Koin meme cepat mati — jika belum tembus TP dalam batas waktu,
+    # lobak posisi biar modal bebas untuk entry berikutnya.
+    import time as _t
+    status_raw = db.get("max_hold_sec", str)
+    try:
+        max_hold_sec = int(float(status_raw or 1200))
+    except (TypeError, ValueError):
+        max_hold_sec = 1200
+    now_ts = int(_t.time())
+    pos_age = now_ts - (pos.get("ts") or now_ts)
+    if max_hold_sec > 0 and pos_age >= max_hold_sec:
+        _cleanup(pos["id"])
+        await _notify(await execute_sell(pos["id"], 1.0, "timeout"))
+        return
 
     # ---------- 1) RUG MONITOR: liq drop mendadak → emergency exit ----------
     # Abaikan pembacaan liq 0/None (Dexscreener stale) — jangan update baseline
@@ -387,6 +407,9 @@ def build_recap(since_ts: int) -> str:
         f"{emo} PnL realized (posisi closed): **{net:+.6f} ETH**",
         f"📊 masih open: {d['open']} posisi",
     ]
+    tmo = n("closed_timeout")
+    if tmo:
+        lines.insert(4, f"⏱️ timeout (tidak tembus TP): **{tmo}**")
     if d["top_caller"]:
         t = d["top_caller"]
         lines.append(f"🏆 caller terbaik: **{t['caller_name']}** ({t['tp1'] or 0} TP1 dari {t['n']} call)")

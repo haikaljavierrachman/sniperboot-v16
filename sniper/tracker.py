@@ -317,18 +317,18 @@ async def tracker_loop():
 
 # ============================ ROTASI OTOMATIS (v16.3) ============================
 
-ROTATE_INTERVAL_SEC = 86400  # 24 jam
+ROTATE_INTERVAL_SEC = 21600  # 6 jam — percepat rotasi insider: memcoin exit liquiditas cepat
 
 
 async def auto_rotation_loop():
-    """Loop background rotasi wallet insider tiap 24 jam (non-blocking):
+    """Loop background rotasi wallet insider tiap 6 jam (non-blocking):
     prune wallet boncos/lunglai + daftar insider baru dari koin runner
     terbaru. On/off via setting tracker_auto_rotate (default \"1\").
 
     Semua kerjaannya sync/network → asyncio.to_thread supaya loop blok
     tracker tidak sempat tertahan.
     """
-    print("[tracker] 🔄 auto rotation loop dimulai (interval 24h)")
+    print("[tracker] 🔄 auto rotation loop dimulai (interval 6h)")
     while True:
         try:
             if db.get("tracker_auto_rotate", str) == "1":
