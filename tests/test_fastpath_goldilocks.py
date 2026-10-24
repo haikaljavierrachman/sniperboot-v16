@@ -113,15 +113,17 @@ check("default entry_mode = mata",
 
 
 # =====================================================================
-print("\n[2] umur pool Goldilocks (min 10s, maks 180s)")
+print("\n[2] umur pool Goldilocks (min 10s, maks 300s / 5m)")
 db.set_("entry_mode", "fast")
 ok, tag, m = goldilocks_eval(pair(age_s=5))
 check("umur 5s (< 10s) → skip", not ok and tag.startswith("age_")
       and abs(m["pool_age"] - 5.0) < 3.0, f"tag={tag}")
-ok, tag, m = goldilocks_eval(pair(age_s=300))
-check("umur 300s (> 180s, koin basi) → skip", not ok
-      and tag.startswith("age_") and abs(m["pool_age"] - 300.0) < 2,
+ok, tag, m = goldilocks_eval(pair(age_s=450))
+check("umur 450s (> 300s, koin basi) → skip", not ok
+      and tag.startswith("age_") and abs(m["pool_age"] - 450.0) < 2,
       f"tag={tag}")
+ok, tag, m = goldilocks_eval(pair(age_s=187))
+check("umur 187s (kasus runner YMB) → lolos", ok and tag == "", f"tag={tag} m={m}")
 ok, tag, m = goldilocks_eval(pair(age_s=60))
 check("umur 60s → lolos", ok and tag == "", f"tag={tag} m={m}")
 
@@ -350,7 +352,7 @@ check("mode fast: notif FAST-PATH BUY terkirim",
 # =====================================================================
 print("\n[7] default settings Goldilocks masuk DB")
 for k, exp in (("goldilocks_min_age_sec", 10.0),
-               ("goldilocks_max_age_sec", 180.0),
+               ("goldilocks_max_age_sec", 300.0),
                ("goldilocks_min_liq", 4000.0),
                ("goldilocks_min_liq_mcap_ratio", 0.35),
                ("goldilocks_max_mcap", 35000.0),

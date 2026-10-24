@@ -133,7 +133,7 @@ SETTING_DEFAULTS = {
     # matematika/bytecode (0 detik LLM). Toggle via panel 🧠 Otak.
     "entry_mode":                 "mata",
     "goldilocks_min_age_sec":     "10",
-    "goldilocks_max_age_sec":     "180",
+    "goldilocks_max_age_sec":     "300",
     "goldilocks_min_liq":         "4000.0",
     "goldilocks_min_liq_mcap_ratio": "0.35",
     "goldilocks_max_mcap":        "35000.0",

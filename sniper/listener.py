@@ -230,7 +230,7 @@ def goldilocks_eval(pair) -> tuple[bool, str, dict]:
     """
     now_ms = time.time() * 1000
     min_age = float(db.get("goldilocks_min_age_sec", float) or 10)
-    max_age = float(db.get("goldilocks_max_age_sec", float) or 180)
+    max_age = float(db.get("goldilocks_max_age_sec", float) or 300)
     min_liq = float(db.get("goldilocks_min_liq", float) or 4000.0)
     min_ratio = float(db.get("goldilocks_min_liq_mcap_ratio", float) or 0.35)
     max_mcap = float(db.get("goldilocks_max_mcap", float) or 35000.0)
