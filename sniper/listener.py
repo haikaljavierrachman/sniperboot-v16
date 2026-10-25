@@ -53,6 +53,74 @@ def _fmt_age(pair) -> str:
     return f"{m / 1440:.1f} hari".replace(".", ",")
 
 
+def _fmt_money_compact(v) -> str:
+    """$812 / $3.1k / $52k (tanpa .0) / $1.2M — '—' bila tak tersedia."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if v >= 1_000_000:
+        return f"${v / 1_000_000:.1f}M"
+    if v >= 1000:
+        s = f"${v / 1000:.1f}k"
+        return s.replace(".0k", "k")
+    return f"${v:.0f}"
+
+
+def _fmt_gate_metrics(m) -> str:
+    """1 baris ringkas metrik gate untuk notif. TIDAK boleh raise.
+
+    Output persis (dipisah " · "):
+      "📊 umur 74s · liq $3.1k · mcap $52k · rasio 6% · dev — · top10 —"
+    Semua nilai tak tersedia (None/{} /m=None) → kembalikan "".
+    """
+    try:
+        if m is None:
+            return ""
+        m = dict(m)
+    except (TypeError, ValueError):
+        return ""
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    # Nilai "tersedia" = SETIDAKNYA SATU dari 6 key STORAGE berisi angka
+    # yang bisa dikonversi. Kalau tidak ada yang bisa dikonversi:
+    #   - m kosong ({} / tanpa storage keys) → string kosong (spec Bagian 2).
+    #   - ada storage keys tapi masing-masing kosong → tetap dirender
+    #     sebagai skeleton "… dev — …" (notif regresi non-error).
+    KEYS = ("pool_age", "liq", "mcap", "ratio", "dev_pct", "top10_pct")
+    # "Semua nilai None" (spec Bagian 2) = semua 6 key ada DAN semuanya None.
+    all_keys_set = all(k in m for k in KEYS)
+    all_none = all(m.get(k) is None for k in KEYS)
+    if not all_keys_set and not any(k in m for k in KEYS):
+        return ""
+    if all_keys_set and all_none:
+        return ""
+    if m is None:
+        return ""
+
+    age_raw = _num(m.get("pool_age"))
+    if age_raw is not None:
+        umur = f"{age_raw:.0f}s" if age_raw < 120 else f"{age_raw / 60:.0f}m"
+    else:
+        umur = "—"
+    liq = _fmt_money_compact(m.get("liq"))
+    mcap = _fmt_money_compact(m.get("mcap"))
+    ratio_raw = _num(m.get("ratio"))
+    rasio = f"{ratio_raw * 100:.0f}%" if ratio_raw is not None else "—"
+    dev_raw = _num(m.get("dev_pct"))
+    dev = f"{dev_raw:.1f}%" if dev_raw is not None else "—"
+    top_raw = _num(m.get("top10_pct"))
+    top10 = f"{top_raw:.1f}%" if top_raw is not None else "—"
+
+    parts = [umur, liq, mcap, rasio, dev, top10]
+    return "📊 umur {} · liq {} · mcap {} · rasio {} · dev {} · top10 {}".format(*parts)
+
+
 def _n(x) -> str:
     return str(int(x)) if x is not None else "?"
 
@@ -244,18 +312,22 @@ def goldilocks_eval(pair) -> tuple[bool, str, dict]:
         pool_age = max(0.0, (now_ms - float(created)) / 1000.0) if created else None
     except (TypeError, ValueError):
         pool_age = None
-    if pool_age is None:
-        return False, "age_unknown", {"pool_age": None}
-    if pool_age < min_age:
-        return False, f"age_{pool_age:.0f}s", {"pool_age": pool_age}
-    if pool_age > max_age:
-        return False, f"age_{pool_age:.0f}s", {"pool_age": pool_age}
-
-    # ---- b. likuiditas & mcap ----
+    # Metrik dasar SELALU dihitung (murni math, tanpa I/O) — supaya notif
+    # dan tools/gate_metrics.py tetap bisa menampilkan liq/mcap/rasio walau
+    # token gagal di tahap umur. Urutan tag keputusan TIDAK berubah.
     liq = dx.liq_usd_or_none(pair)
     mcap = dx.mcap_of(pair)
     metr = {"pool_age": pool_age, "liq": liq, "mcap": mcap,
             "ratio": (liq / mcap) if (liq and mcap > 0) else 0.0}
+
+    if pool_age is None:
+        return False, "age_unknown", metr
+    if pool_age < min_age:
+        return False, f"age_{pool_age:.0f}s", metr
+    if pool_age > max_age:
+        return False, f"age_{pool_age:.0f}s", metr
+
+    # ---- b. likuiditas & mcap ----
     if liq is None or liq < min_liq:
         return False, "liq_rendah", metr
     if mcap <= 0 or mcap < min_mcap or mcap > max_mcap:
@@ -284,24 +356,31 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
       'mcap_onchain_pucuk' — mcap hasil quote on-chain > goldilocks_max_mcap
                              / scanner_mcap_max
     """
+    # ---- metrik dasar dipanggil SEKALI di depan (murni math, tanpa I/O) ----
+    # Urutan keputusan tetap: safety -> dev -> top10 -> goldilocks -> quoter.
+    ok_g, tag_g, base = goldilocks_eval(pair)
+    base = base or {}
+
     # ---- c. safety guard (bytecode honeypot + dev + top10) ----
     ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
     if not ok:
         print(f"[fast-safety] {ca[:10]}: {reason}")
-        return False, "dev_terlalu_besar", {}
+        return False, "dev_terlalu_besar", base
     # batas dev/top10 ketat versi Goldilocks (rasio, bukan persen)
     max_dev = float(db.get("goldilocks_max_dev_pct", float) or 0.04)
     max_top = float(db.get("goldilocks_max_top10_pct", float) or 0.30)
     dev = safety.dev_pct(_trader, ca)          # persen (0-100)
+    base["dev_pct"] = dev                      # persen — simpan SEBELUM cek
     if dev and dev / 100.0 > max_dev:
-        return False, "dev_terlalu_besar", {}
+        return False, "dev_terlalu_besar", base
     exclude = {pair.get("pairAddress", ""), ca}
     top = safety.top_holders_pct(_trader, ca, exclude)  # persen (0-100)
+    base["top10_pct"] = top                    # persen — simpan SEBELUM cek
     if top and top / 100.0 > max_top:
-        return False, "top10_terlalu_besar", {}
+        return False, "top10_terlalu_besar", base
 
     metr = {}
-    ok_m, tag, metr = goldilocks_eval(pair)
+    ok_m, tag, metr = ok_g, tag_g, base
     if not ok_m:  # data berubah sejak tahap pertama — pakai tag terakhir
         return False, tag, metr
     liq, mcap, pool_age = metr["liq"], metr["mcap"], metr["pool_age"]
@@ -382,6 +461,7 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
     scanner_mcap_max = float(db.get("scanner_mcap_max", float) or 45000)
     gold_max_mcap = float(db.get("goldilocks_max_mcap", float) or 35000)
     if mcap_onchain > scanner_mcap_max or mcap_onchain > gold_max_mcap:
+        metr["mcap_onchain"] = mcap_onchain   # angka pucuk ikut ke notif
         return False, "mcap_onchain_pucuk", metr
     metr.update({"tokens_total": tokens_total,
                  "entry_price_usd": entry_price_usd,
@@ -478,14 +558,17 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
     # Lolos semua gate → keputusan sintetis conviction 90 → eksekusi di
     # alur bawah (dry_run_simulated ATAU live buy) seperti biasa.
     entry_mode = db.get("entry_mode", str) or "mata"
+    decision = None  # default None — fastpath/mata menimpanya saat aktif
     if entry_mode == "fast":
         ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair)
         if not ok_f:
             print(f"[fast-skip] {sym}: {tag_f}")
             if should_notify_fast_skip(tag_f):
+                gl = _fmt_gate_metrics(metr_f)
                 await _notify(
                     f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
-                    f"`{ca}`\nreason: {tag_f}")
+                    f"`{ca}`\nreason: {tag_f}"
+                    + (f"\n{gl}" if gl else ""))
             return f"skip_fast:{tag_f}"
         liq_f = metr_f.get("liq") or 0.0
         mcap_f = metr_f.get("mcap") or 0.0
@@ -507,6 +590,8 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
             "reason": (f"⚡ FAST-PATH Goldilocks: umur {age_f:.0f}s, "
                        f"liq ${liq_f:,.0f}, mcap ${mcap_f:,.0f}, "
                        f"ratio {ratio_f * 100:.1f}%, quote OK"),
+            # plumbing metrik gate → notif BUY (2 baris di bawah)
+            "_gate_metrics": dict(metr_f or {}),
         }
         db.log_decision(ca=ca, symbol=sym, role="fastpath", action="BUY",
                         conviction=90, size_mult=1.0,
@@ -815,9 +900,38 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
     soc_line = _soc["label"] if _soc["count"] else "tanpa jejak sosmed"
     chart = f"https://dexscreener.com/{pos['chain_slug']}/{pos['pair_address']}"
     txurl = f"{config.EXPLORER_URL}/tx/{pos['buy_tx']}" if pos.get("buy_tx") else None
+    # ---------- 2 baris angka gate (dari _fastpath_gate, BUKAN hitungan baru) ----
+    gate = (decision or {}).get("_gate_metrics") or {}
+    gate_lines = ""
+
+    def _dash(v):
+        return "—" if v is None else v
+
+    if gate:
+        _age = gate.get("pool_age")
+        _age_s = f"{_age:.0f}s" if isinstance(_age, (int, float)) and _age < 120 else (
+            f"{_age / 60:.0f}m" if isinstance(_age, (int, float)) else "—")
+        _liq = gate.get("liq")
+        _mcap = gate.get("mcap")
+        _ratio = gate.get("ratio")
+        min_ratio = float(db.get("goldilocks_min_liq_mcap_ratio", float) or 0.35)
+        max_dev = float(db.get("goldilocks_max_dev_pct", float) or 0.04)      # rasio
+        max_top = float(db.get("goldilocks_max_top10_pct", float) or 0.30)    # rasio
+        max_oc = float(db.get("goldilocks_max_mcap", float) or 35000)
+        _ratio_s = f"{_ratio * 100:.0f}%" if _ratio is not None else "—"
+        _dev = f"{gate.get('dev_pct'):.1f}%" if gate.get("dev_pct") is not None else "—"
+        _top = f"{gate.get('top10_pct'):.1f}%" if gate.get("top10_pct") is not None else "—"
+        _oc = (f"${gate.get('mcap_onchain'):,.0f}"
+               if gate.get("mcap_onchain") is not None else "—")
+        gate_lines = (
+            f"\n⚙️ gate: umur {_dash(_age_s)} · liq/mcap {_dash(_ratio_s)}"
+            + (f" (min {min_ratio * 100:.0f}%)" if _ratio is not None else "")
+            + f"\n👤 dev {_dash(_dev)} (maks {max_dev * 100:.0f}%)"
+            + f" · top10 {_dash(_top)} (maks {max_top * 100:.0f}%)"
+            + f" · mcap on-chain {_dash(_oc)} (maks ${max_oc:,.0f})")
     await _notify(
         f"🟢 **BUY {pos['symbol']}**  _via {src['name']}_\n"
-        f"`{pos['ca']}`\n"
+        f"`{pos['ca']}`{gate_lines}\n"
         f"💰 mcap ${mcap:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
         f"🌐 sosmed: {soc_line}\n"
         f"masuk **${pos['usd_spent']:.2f}** ({pos['eth_spent']:.6f} ETH) → {pos['tokens_total']:,.0f} {pos['symbol']}\n"
