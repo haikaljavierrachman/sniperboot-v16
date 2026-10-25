@@ -266,6 +266,14 @@ def goldilocks_eval(pair) -> tuple[bool, str, dict]:
     return True, "", metr
 
 
+# Penolakan yang sudah pasti & tidak bisa ditindaklanjuti -> jangan spam.
+SILENT_FAST_SKIP_PREFIXES = ("age_",)
+
+
+def should_notify_fast_skip(tag: str) -> bool:
+    return not (tag or "").startswith(SILENT_FAST_SKIP_PREFIXES)
+
+
 async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
     """Gate lengkap fast-path (bagian I/O): safety dev/top10/honeypot +
     quote on-chain mcap guard. Return (lolos, skip_tag, metrik goldilocks).
@@ -474,9 +482,10 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair)
         if not ok_f:
             print(f"[fast-skip] {sym}: {tag_f}")
-            await _notify(
-                f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
-                f"`{ca}`\nreason: {tag_f}")
+            if should_notify_fast_skip(tag_f):
+                await _notify(
+                    f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
+                    f"`{ca}`\nreason: {tag_f}")
             return f"skip_fast:{tag_f}"
         liq_f = metr_f.get("liq") or 0.0
         mcap_f = metr_f.get("mcap") or 0.0

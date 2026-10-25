@@ -209,6 +209,29 @@ async def process_insider_buy(token_ca: str, insider_addr: str = "", notify=None
 
 # ============================ SCAN BLOK ============================
 
+def pool_too_old(pair, max_age_sec, now_ms=None):
+    """(too_old, age_sec) dari respons Dexscreener.
+
+    Fail-OPEN: pair/created tidak ada / tidak bisa diparse → (False, None)
+    (jangan memblokir sinyal karena data tak tersedia). `pairCreatedAt`
+    Dexscreener dalam MILIDETIK.
+    """
+    try:
+        if not pair or not isinstance(pair, dict):
+            return False, None
+        created = pair.get("pairCreatedAt")
+        if created is None or created == "":
+            return False, None
+        created_ms = float(created)
+        now_val = now_ms if now_ms is not None else time.time() * 1000
+        age_sec = (float(now_val) - created_ms) / 1000.0
+        if age_sec != age_sec:  # NaN guard
+            return False, None
+        return age_sec > float(max_age_sec), age_sec
+    except (TypeError, ValueError):
+        return False, None
+
+
 async def _inspect_block(w3, block_number: int):
     """Periksa satu blok: cari tx dari wallet insider ke router swap → pipa.
 
@@ -255,6 +278,16 @@ async def _inspect_block(w3, block_number: int):
         # awal; kita ikut di harga biasanya sudah naik).
         try:
             pair = await asyncio.to_thread(dx.best_pair, token_out)
+            # 🔒 Gate UMUR POOL di depan (data pairCreatedAt sudah ada di
+            # respons `pair` ini — 0 request jaringan tambahan). Pool umur
+            # > goldilocks_max_age_sec jelas bukan launch baru; jangan buang
+            # waktu ke safety.check on-chain yang MAHAL.
+            max_age = float(db.get("goldilocks_max_age_sec", float) or 300)
+            too_old, age = pool_too_old(pair, max_age)
+            if too_old:
+                print(f"[tracker] skip {token_out[:10]}… umur {age:.0f}s > "
+                      f"{max_age:.0f}s (bukan launch baru)")
+                continue
             pc = (((pair or {}).get("priceChange") or {}).get("m5")) or 0.0
             if float(pc) > MAX_SLIP_PCT:
                 print(f"[tracker] beta pusing: 'insider buy {token_out[:10]}… "
