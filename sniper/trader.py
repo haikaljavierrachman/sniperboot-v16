@@ -276,6 +276,11 @@ class Trader:
 
         return {
             "ca": ca.lower(), "symbol": sym,
+            # `name` WAJIB ikut: clone_guard.note_entry() memakai symbol+name
+            # sebagai family key. Tanpa ini entry_log menulis "sym:marvin|"
+            # sementara cek memakai "sym:marvin|marvin the martian" →
+            # rate-limit tidak pernah cocok (bug terverifikasi 2026-10-25).
+            "name": (pair.get("baseToken") or {}).get("name", ""),
             "pair_address": pair["pairAddress"], "chain_slug": pair["chainId"],
             "pool_type": ptype, "fee": fee,
             "entry_price_usd": buy_usd / got,

@@ -152,6 +152,14 @@ SETTING_DEFAULTS = {
     "goldilocks_max_slippage":    "0.25",
     "goldilocks_tp1":             "0.35",
     "goldilocks_tp2":             "0.80",
+    # ---- 🛡️ Clone guard / operator-family guard (v16.6) ----
+    # Entry rate-limit per keluarga operator: maks N CA DISTINCT per keluarga
+    # dalam jendela H jam. Bukan blacklist token — Pons tipe apa pun tetap
+    # boleh dibeli selama keluarganya belum kelebihan jatah entry.
+    # (Nama key memakai '_per_day' demi kompatibilitas kontraksi tugas, nilai
+    #  default window 24 jam.)
+    "clone_max_entries_per_day": "3",
+    "clone_entry_window_hours":  "24",
     # ---- 📡 Userbot Telegram (alpha groups listener) — 100% OPSIONAL ----
     # Default '0' = NONAKTIF: akun pribadi tidak online di VPS (bebas risiko
     # ban/flag), sinyal 100% dipasok on-chain (factory & insider tracker).
@@ -218,6 +226,8 @@ SETTING_LABELS = {
     "goldilocks_max_slippage":    "⚡ Goldilocks: maks slippage quote",
     "goldilocks_tp1":             "⚡ Goldilocks: TP1 (0.35 = +35%)",
     "goldilocks_tp2":             "⚡ Goldilocks: TP2 (0.80 = +80%)",
+    "clone_max_entries_per_day": "🛡 Clone guard: maks entry per keluarga operator",
+    "clone_entry_window_hours":  "🛡 Clone guard: jendela hitung entry (jam)",
     "userbot_enabled":       "📡 Userbot Telegram alpha groups (1/0, default 0=off)",
 }
 

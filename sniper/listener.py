@@ -674,6 +674,9 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
                 f"melebihi batas aman $45k)_")
             return "buy_failed:mcap_onchain_pucuk"
         pos = {"ca": ca.lower(), "symbol": sym,
+               # lihat catatan di sniper/trader.py: `name` dipakai sebagai
+               # family key oleh clone_guard.note_entry().
+               "name": (pair.get("baseToken") or {}).get("name", ""),
                "pair_address": pair["pairAddress"], "chain_slug": pair["chainId"],
                "pool_type": dx.pool_type(pair), "fee": 3000,
                "entry_price_usd": entry_price_usd,

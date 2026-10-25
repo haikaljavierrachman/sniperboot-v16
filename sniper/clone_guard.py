@@ -32,6 +32,7 @@ from . import config, db  # noqa: E402  (noqa lama)
 BS = config.BLOCKSCOUT_API.rstrip("/")
 
 
+
 def _bs_get(path: str, timeout: float = 8):
     """GET Blockscout → dict, atau None (tanpa raise)."""
     try:
@@ -90,6 +91,171 @@ def funders_of(deployer: str, limit: int = 30) -> list | None:
     return out
 
 
+
+# ---------- 0. entry rate-limit per operator-family (v16.6 ratelimit) ----------
+
+def _norm(s: str) -> str:
+    """Normalisasi teks keluarga: strip + lower + collapse spasi.
+    Konsisten untuk simpan & baca (family_keys / note_entry / too_many_entries)."""
+    return " ".join((s or "").strip().lower().split())
+
+
+def family_keys(ca: str, symbol: str = "", name: str = "") -> list[str]:
+    """SEMUA kunci keluarga untuk sebuah CA, urut dari paling kuat:
+      1. dep:<deployer>                 (deployer_registry.deployer terisi)
+      2. funder:<addr>                  (1 kunci per funder dari operator_funders
+                                         untuk deployer tsb, maks 10 funder pertama)
+      3. fp:<template_fp>|<symbol>|<name>  (template_fp terisi)
+      4. sym:<symbol>|<name>            (fallback, symbol & name dinormalisasi
+                                         strip+lower+collapse spasi; HANYA bila
+                                         len(symbol) >= 3)
+    DB-only, fail-open: error → [].
+    """
+    ca = (ca or "").strip().lower()
+    if not ca.startswith("0x"):
+        return []
+    keys: list[str] = []
+    sym_row = nm_row = ""
+    try:
+        with db._lock, db._conn() as c:
+            _init_tables(c)
+            row = c.execute(
+                "SELECT deployer, template_fp, symbol, name FROM deployer_registry WHERE ca=?",
+                (ca,)).fetchone()
+            if row:
+                sym = _norm(symbol) or _norm(row["symbol"])
+                nm = _norm(name) or _norm(row["name"])
+                sym_row, nm_row = sym, nm
+                dep = row["deployer"]
+                if dep:
+                    keys.append(f"dep:{dep.lower()}")
+                    frows = c.execute(
+                        "SELECT funder FROM operator_funders WHERE deployer=? LIMIT 10",
+                        (dep,)).fetchall()
+                    keys.extend(f"funder:{f[0].lower()}" for f in frows)
+                if row["template_fp"]:
+                    keys.append(f"fp:{row['template_fp']}|{sym}|{nm}")
+    except Exception:
+        pass  # fail-open
+    sym_f = _norm(symbol) or sym_row
+    nm_f = _norm(name) or nm_row
+    if len(sym_f) >= 3:
+        keys.append(f"sym:{sym_f}|{nm_f}")
+        # Kunci symbol-saja: jaring pengaman kalau `name` tidak ikut terkirim
+        # di salah satu jalur (mis. posisi dari trader tanpa field name).
+        # Tanpa ini note_entry menulis "sym:marvin|" sementara cek memakai
+        # "sym:marvin|marvin the martian" → hitungan selalu 0.
+        keys.append(f"symonly:{sym_f}")
+    # dedupe, pertahankan urutan kekuatan
+    seen = set()
+    out = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def note_entry(ca: str, symbol: str = "", name: str = "") -> None:
+    """CATAT entry posisi yang benar-benar dibuka ke entry_log (per key keluarga).
+
+    Dipanggil SEKALI oleh db.open_position SETELAH INSERT positions berhasil.
+    Fail-open total: error apa pun tidak boleh menggagalkan posisi.
+    """
+    try:
+        ca_key = (ca or "").strip().lower()
+        if not ca_key.startswith("0x"):
+            return
+        # permudah pengisian registry (deployer/funder) di background —
+        # dipanggil walau register_async sudah pernah dipanggil (efeknya
+        # no-op aman, dan nanti register() melengkapi data dari jaringan).
+        register_async(ca_key, symbol=symbol, name=name)
+        keys = family_keys(ca_key, symbol=symbol, name=name)
+        if not keys:
+            # registry masih kosong — minimal catat fallback metadata agar
+            # rate-limit tetap bekerja measurable untuk keluarganya.
+            if len(_norm(symbol)) >= 3:
+                keys = [f"sym:{_norm(symbol)}|{_norm(name)}"]
+        if not keys:
+            return
+        now = int(time.time())
+        with db._lock, db._conn() as c:
+            _init_tables(c)
+            for k in keys:
+                c.execute("INSERT OR IGNORE INTO entry_log(key,ca,ts) VALUES(?,?,?)",
+                          (k, ca_key, now))
+    except Exception:
+        pass  # guard pelengkap — tidak boleh pernah raise
+
+
+def backfill_entry_keys(ca: str) -> None:
+    """Lengkapi entry_log untuk CA yang SUDAH pernah dibeli, memakai kunci
+    keluarga terbaru (dep:/funder:/fp:) tanpa mengubah timestamp asli.
+
+    Dipanggil worker background setelah `register()` selesai. Tidak pernah
+    mengubah jumlah entry untuk kunci `sym:` yang sudah ada (INSERT OR IGNORE).
+    Fail-open.
+    """
+    try:
+        ca = (ca or "").strip().lower()
+        if not ca.startswith("0x"):
+            return
+        keys = family_keys(ca)
+        if not keys:
+            return
+        with db._lock, db._conn() as c:
+            _init_tables(c)
+            row = c.execute(
+                "SELECT ts FROM entry_log WHERE ca=? ORDER BY ts ASC LIMIT 1",
+                (ca,)).fetchone()
+            if not row:
+                return
+            ts = row["ts"]
+            for k in keys:
+                c.execute("INSERT OR IGNORE INTO entry_log(key,ca,ts) VALUES(?,?,?)",
+                          (k, ca, ts))
+    except Exception:
+        pass  # guard pelengkap — tidak boleh pernah raise
+
+
+def too_many_entries(ca: str, symbol: str = "", name: str = "",
+                     limit: int = 3, hours: int = 24) -> tuple[bool, str]:
+    """Rate-limit ENTRY per operator-family: keluarga yang sama ≥ `limit` CA
+    DISTINCT dalam `hours` jam terakhir → (True, reason).
+
+    100% DB-ONLY (NOL panggilan jaringan). Wajib selesai < 20 ms.
+    Hitung COUNT(DISTINCT ca) untuk SETIAP kunci keluarga; ambil yang TERBESAR.
+    Fail-open: DB error → (False, ""), jangan blokir entry.
+    """
+    try:
+        ca_key = (ca or "").strip().lower()
+        if not ca_key.startswith("0x"):
+            return False, ""
+        keys = family_keys(ca_key, symbol=symbol, name=name)
+        sym_f = _norm(symbol)
+        if len(sym_f) >= 3:
+            fb = f"sym:{sym_f}|{_norm(name)}"
+            if fb not in keys:
+                keys = keys + [fb]
+        if not keys:
+            return False, ""
+        since = int(time.time()) - hours * 3600
+        worst = 0
+        with db._lock, db._conn() as c:
+            _init_tables(c)
+            for k in keys:
+                n = c.execute(
+                    "SELECT COUNT(DISTINCT ca) FROM entry_log WHERE key=? AND ts>=?",
+                    (k, since)).fetchone()[0]
+                if n > worst:
+                    worst = n
+        if worst >= limit:
+            return True, f"operator-family sudah {worst} entry/{hours}j (maks {limit})"
+        return False, ""
+    except Exception:
+        return False, ""
+
+
 # ---------- 3. registry DB ----------
 
 def _init_tables(c):
@@ -138,6 +304,17 @@ def _init_tables(c):
             ts INTEGER,
             PRIMARY KEY (funder, deployer)
         )""")
+
+    # entry_log: catat entry per key keluarga operator (rate-limit jumlah
+    # entry, bukan blacklist token). PRIMARY KEY(key,ca) → sama CA di-note
+    # dua kali tidak menambah count.
+    c.execute("""CREATE TABLE IF NOT EXISTS entry_log(
+        key TEXT,
+        ca TEXT,
+        ts INTEGER,
+        PRIMARY KEY(key, ca)
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_entry_log_key_ts ON entry_log(key, ts)")
 
 
 def register(ca: str, symbol: str = "", name: str = "",
@@ -233,6 +410,12 @@ def _bg_worker():
             row = get_registry(ca)
             if not (row and row.get("template_fp") and row.get("deployer")):
                 register(ca, symbol=symbol, name=name, total_supply=total_supply)
+            # Setelah registry lengkap, lengkapi entry_log dengan kunci
+            # operator (dep:/funder:) yang belum ada saat posisi dibuka —
+            # registrasi butuh ~20s, sedangkan buy terjadi beberapa detik
+            # setelah safety.check. Tanpa backfill, rate-limit operator
+            # hanya efektif lewat kunci sym.
+            backfill_entry_keys(ca)
         except Exception:
             pass
         finally:

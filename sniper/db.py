@@ -204,6 +204,14 @@ def open_position(**kw):
                    :tokens_total,:tokens_left,:eth_spent,:usd_spent,:honeypot,:source_name,
                    :caller_id,:caller_name,:buy_tx,:is_simulated,:ts)""",
             {**kw, "ts": int(time.time())})
+    # catat entry ke entry_log clone_guard — SETELAH lock dilepas (db._lock
+    # non-reentrant: memanggil note_entry di dalam `with _lock` = DEADLOCK).
+    # Fail-open: kegagalan logging TIDAK boleh membatalkan posisi.
+    try:
+        from . import clone_guard as _cg
+        _cg.note_entry(kw["ca"], kw.get("symbol", ""), kw.get("name", ""))
+    except Exception:
+        pass
 
 
 def open_positions():

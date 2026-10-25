@@ -242,6 +242,24 @@ def check(trader, ca: str, pair) -> tuple[bool, str]:
         print(f"[safety] ⚠️ clone_guard gagal dijalankan (fail-open): "
               f"{e.__class__.__name__}: {e}")
 
+    # ---- 🚦 Entry rate-limit per operator-family (v16.6 ratelimit) ----
+    # Batas JUMLAH entry per keluarga (bukan blacklist token) — fail-open.
+    # (`_sym`/`_nm` sudah selalu terisi oleh blok clone guard di atas —
+    #  aturannya langsung print warning dan lanjut kalau blok itu gagal.)
+    try:
+        from . import clone_guard as _cg2
+        limit_hits = int(db.get("clone_max_entries_per_day") or 3)
+        window_h = int(db.get("clone_entry_window_hours") or 24)
+        if limit_hits > 0:
+            too_many, why = _cg2.too_many_entries(
+                ca, symbol=_sym, name=_nm,
+                limit=limit_hits, hours=window_h)
+            if too_many:
+                return False, f"family limit: {why}"
+    except Exception as e:
+        print(f"[safety] ⚠️ entry rate-limit gagal dijalankan (fail-open): "
+              f"{e.__class__.__name__}: {e}")
+
     max_dev = db.get("dev_max_pct")
     max_top = db.get("top10_max_pct")
 
