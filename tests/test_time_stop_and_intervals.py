@@ -185,9 +185,17 @@ def test_timeout_reason_recorded_in_daily_recap():
 # ---------- Poin 2, 3, 4: default setting / konstanta ----------
 
 def test_defaults_poin234():
-    assert config.SETTING_DEFAULTS["poll_seconds"] == "5"
+    assert config.SETTING_DEFAULTS["poll_seconds"] == "3"
     assert config.SETTING_DEFAULTS["max_hold_sec"] == "420"
     assert config.SETTING_DEFAULTS["scanner_max_age_min"] == "5"
+
+
+def test_moonbag_dual_guard_defaults():
+    """v16.7: default guard moonbag ada di config."""
+    assert config.SETTING_DEFAULTS["moonbag_inactivity_sec"] == "420"
+    assert config.SETTING_DEFAULTS["moonbag_max_hold_sec"] == "2700"
+    assert "moonbag_inactivity_sec" in config.SETTING_LABELS
+    assert "moonbag_max_hold_sec" in config.SETTING_LABELS
 
 
 def test_max_hold_label_present():
@@ -212,6 +220,8 @@ if __name__ == "__main__":
     print("PASS recap timeout")
     test_defaults_poin234()
     print("PASS defaults poin 2/3/4")
+    test_moonbag_dual_guard_defaults()
+    print("PASS moonbag dual-guard defaults")
     test_max_hold_label_present()
     print("PASS label")
     test_rotate_interval_sec_six_hours()

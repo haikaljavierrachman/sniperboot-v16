@@ -230,6 +230,10 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
         db.update_position(pos_id, tokens_left=0, status="closed_timeout", closed_at=now)
         text = (f"⏱️ **TIME STOP (TIMEOUT {int((now - pos['ts'])/60)}m)** {tag}\n"
                 f"tidak tembus TP dalam batas waktu:\n{nums}\nposisi CLOSED{warn}")
+    elif reason == "inactive":
+        db.update_position(pos_id, tokens_left=0, status="closed_inactive", closed_at=now)
+        text = (f"⏱️ **EXIT INACTIVE (volume mati {int((now - pos['ts'])/60)}m)** {tag}\n"
+                f"0 transaksi / pool kering — moonbag di-harvest:\n{nums}\nposisi CLOSED{warn}")
     else:
         if fraction >= 1 or left <= 0:
             db.update_position(pos_id, tokens_left=0, status="closed_manual", closed_at=now)
@@ -318,12 +322,67 @@ async def _check(pos):
     now_ts = int(_t.time())
     pos_age = now_ts - (pos.get("ts") or now_ts)
     # 🚀 Time-Stop Exemption: moonbag lapis 3 (tp2_done=1) sudah 100%
-    # house money — bebas dari time-stop, biarkan mengejar runner 3x-5x.
-    # Rug monitor & trailing stop tetap aktif untuk posisi ini.
-    if max_hold_sec > 0 and pos_age >= max_hold_sec and not pos.get("tp2_done"):
+    # house money — bebas dari time-stop biasa. Rug monitor, trailing
+    # stop, dan Moonbag Dual-Guard di bawah tetap aktif.
+    is_moonbag = bool(pos.get("tp2_done"))  # 1 = moonbag lapis 3
+    if max_hold_sec > 0 and pos_age >= max_hold_sec and not is_moonbag:
         _cleanup(pos["id"])
         await _notify(await execute_sell(pos["id"], 1.0, "timeout"))
         return
+
+    # ---------- 🌙 0b) MOONBAG DUAL-GUARD (v16.7) ----------
+    # Dua saringan khusus posisi moonbag (tp2_done=1) supaya sisa koin
+    # house money tidak menguap begitu saja:
+    #   a) Inactivity Guard: volume mati (txns m5 = 0 selama
+    #      moonbag_inactivity_sec default 420s) ATAU pool on-chain
+    #      terkuras (quote jual = 0 ETH) → EXIT INACTIVE.
+    #   b) Hard-Cap Runner: umur posisi >= moonbag_max_hold_sec
+    #      (default 2700s / 45m) → HARVEST FULL.
+    # Trailing stop 20% tetap aktif mendeteksi penurunan dari puncak.
+    if is_moonbag:
+        inactivity_raw = db.get("moonbag_inactivity_sec", str)
+        try:
+            inactivity_sec = int(float(inactivity_raw or 420))
+        except (TypeError, ValueError):
+            inactivity_sec = 420
+        # ---- a) Inactivity Guard ----
+        if inactivity_sec > 0 and pos_age >= inactivity_sec:
+            txns_m5 = ((pair.get("txns") or {}).get("m5") or {})
+            vol_dead = ((txns_m5.get("buys") or 0) == 0
+                        and (txns_m5.get("sells") or 0) == 0)
+            pool_dry = False
+            if _trader:
+                try:
+                    token = _trader.erc20(pos["ca"])
+                    dec = await asyncio.to_thread(token.functions.decimals().call)
+                    amt_raw = int(pos["tokens_left"] * 10**dec)
+                    if amt_raw > 0:
+                        q_eth = await asyncio.to_thread(
+                            _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
+                            pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
+                        pool_dry = (q_eth or 0) <= 0
+                except Exception:
+                    pass
+            if vol_dead or pool_dry:
+                _cleanup(pos["id"])
+                await _notify(
+                    f"⏱ **{pos['symbol']}** (Moonbag) volume mati "
+                    f"(0 txns / pool kering) → EXIT INACTIVE!")
+                await _notify(await execute_sell(pos["id"], 1.0, "inactive"))
+                return
+        # ---- b) Hard-Cap Runner ----
+        hardcap_raw = db.get("moonbag_max_hold_sec", str)
+        try:
+            hardcap_sec = int(float(hardcap_raw or 2700))
+        except (TypeError, ValueError):
+            hardcap_sec = 2700
+        if hardcap_sec > 0 and pos_age >= hardcap_sec:
+            _cleanup(pos["id"])
+            await _notify(
+                f"🏁 **{pos['symbol']}** (Moonbag) mencapai batas maksimal "
+                f"45m runner → HARVEST FULL!")
+            await _notify(await execute_sell(pos["id"], 1.0, "timeout"))
+            return
 
     # ---------- 1) RUG MONITOR: liq drop mendadak → emergency exit ----------
     # Abaikan pembacaan liq 0/None (Dexscreener stale) — jangan update baseline

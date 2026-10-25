@@ -80,8 +80,14 @@ SETTING_DEFAULTS = {
     "buy_slippage":   "0.60",
     "sell_slippage":  "0.35",
     "min_liq_usd":    "500",
-    "poll_seconds":   "5",
+    "poll_seconds":   "3",
     "max_hold_sec":   "420",
+    # ---- 🌙 Moonbag dual-guard (v16.7) ----
+    # inactivity: 7 menit tanpa transaksi (Dexscreener txns.m5 = 0) ATAU
+    # quote jual on-chain = 0 → EXIT INACTIVE.
+    # hard cap: 45 menit batas maksimal runner moonbag → HARVEST FULL.
+    "moonbag_inactivity_sec": "420",
+    "moonbag_max_hold_sec":   "2700",
     "paused":         "0",
     "safety_on":      "1",
     "dev_max_pct":    "5",
@@ -174,6 +180,8 @@ SETTING_LABELS = {
     "min_liq_usd":   "💧 Min liquidity (USD)",
     "poll_seconds":  "⏱ Interval cek harga (dtk)",
     "max_hold_sec":  "⏱ Batas max hold posisi (detik, misal 420 = 7m, 0=off)",
+    "moonbag_inactivity_sec": "⏱ Moonbag: batas volume mati (detik, 0 txns m5 → EXIT INACTIVE, 420 = 7m)",
+    "moonbag_max_hold_sec":   "🏁 Moonbag: batas maksimal hold runner (detik, 2700 = 45m → HARVEST FULL)",
     "safety_on":     "🛡 Safety filter (1=on 0=off)",
     "dev_max_pct":   "🕵️ Max dev holding (%)",
     "top10_max_pct": "🐋 Max top10 holders (%)",
@@ -212,6 +220,9 @@ SETTING_LABELS = {
     "goldilocks_tp2":             "⚡ Goldilocks: TP2 (0.80 = +80%)",
     "userbot_enabled":       "📡 Userbot Telegram alpha groups (1/0, default 0=off)",
 }
+
+SETTING_DESCRIPTIONS = SETTING_LABELS
+
 
 def validate():
     # PRIVATE_KEY tidak wajib di sini: wallet bisa dari DB (generate via bot).

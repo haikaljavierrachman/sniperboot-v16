@@ -172,15 +172,26 @@ def test_layer2_no_retrigger_tp2_after_tp2_done():
 # ---------- Time-stop exemption ----------
 
 def test_layer2_tp2done_exempt_from_time_stop():
-    # posisi umur 25 menit (> 1200 dtk) tapi tp2_done=1 → TIDAK timeout
+    # posisi umur 25 menit (> 1200 dtk) tapi tp2_done=1 → TIDAK timeout.
+    # v16.7: moonbag dual-guard aktif → txns m5 ramai supaya inactivity
+    # guard tidak picu, dan umur < moonbag_max_hold_sec (2700).
     sent = []
     pos = _make_pos(ts=int(time.time()) - 1500, tokens_left=250.0,
                     tp1_done=1, tp2_done=1)
-    pos["peak_price"] = 0.0020
+    pos["peak_price"] = 0.0025
     db = FakeDB({"max_hold_sec": "1200", "trail_on": "1",
                  "moonbag_trail_pct": "0.20"}, pos=pos)
-    _install_engine(db, sent, price=0.0020)
-    asyncio.run(engine._check(db.pos))
+    _install_engine(db, sent, price=0.0021)
+    orig = engine.current_pair
+    async def active_pair(p):
+        return {"priceUsd": "0.0021", "priceNative": "0.001",
+                "liquidity": {"usd": 50000},
+                "txns": {"m5": {"buys": 8, "sells": 8}}}
+    engine.current_pair = active_pair
+    try:
+        asyncio.run(engine._check(db.pos))
+    finally:
+        engine.current_pair = orig
     closed = [u for u in db.updates if "status" in u]
     assert not closed, db.updates  # tidak ada closed_timeout dsb
     assert db.pos["status"] == "open", db.pos
@@ -214,10 +225,19 @@ def test_layer3_moonbag_peak_tracking_and_trailing_exit():
     sent = []
     db2 = FakeDB({"trail_on": "1", "moonbag_trail_pct": "0.20"},
                  pos=_make_pos(tokens_left=250.0, tp1_done=1, tp2_done=1,
-                               ts=int(time.time()) - 1500))
+                               ts=int(time.time()) - 60))
     db2.pos["peak_price"] = 0.0040
     _install_engine(db2, sent, price=0.0032)
-    asyncio.run(engine._check(db2.pos))
+    orig = engine.current_pair
+    async def active_pair(p):
+        return {"priceUsd": "0.0032", "priceNative": "0.001",
+                "liquidity": {"usd": 50000},
+                "txns": {"m5": {"buys": 5, "sells": 5}}}
+    engine.current_pair = active_pair
+    try:
+        asyncio.run(engine._check(db2.pos))
+    finally:
+        engine.current_pair = orig
     assert _last_update_value(db2, "tokens_left") == 0, db2.updates
     assert db2.pos["status"] == "closed_trail", db2.pos
     assert any("TRAILING STOP" in s for s in sent), sent
@@ -249,6 +269,101 @@ def test_layer3_no_tp_ceiling_on_moonbag():
     asyncio.run(engine._check(db.pos))
     assert not [u for u in db.updates
                 if "tokens_left" in u or "status" in u], db.updates
+    assert db.pos["status"] == "open", db.pos
+
+
+# ---------- v16.7: Moonbag Dual-Guard ----------
+
+def test_moonbag_inactivity_guard_exit_inactive():
+    """Moonbag umur >420s dan txns.m5 = 0 → EXIT INACTIVE (closed_inactive)."""
+    sent = []
+    pos = _make_pos(ts=int(time.time()) - 500, tokens_left=250.0,
+                    tp1_done=1, tp2_done=1)
+    db = FakeDB({"trail_on": "1", "moonbag_trail_pct": "0.20",
+                 "moonbag_inactivity_sec": "420",
+                 "moonbag_max_hold_sec": "2700"}, pos=pos)
+    _install_engine(db, sent, price=0.0016)  # harga masih di atas stop 0.0020? tidak — di bawah peak, tapi di atas entry; trailing 20% dari peak 0.0011 → stop 0.00088, tidak trigger
+    asyncio.run(engine._check(db.pos))
+    assert "closed_inactive" in db.statuses(), db.updates
+    assert any("EXIT INACTIVE" in s for s in sent), sent
+    assert _last_update_value(db, "tokens_left") == 0, db.updates
+
+
+def test_moonbag_inactivity_guard_not_triggered_young_or_active():
+    """Moonbag muda (<420s) ATAU txns m5 ramai → tidak dijual inactive."""
+    # 1) moonbag muda tapi volume mati → belum guard
+    sent = []
+    pos = _make_pos(ts=int(time.time()) - 60, tokens_left=250.0,
+                    tp1_done=1, tp2_done=1)
+    db = FakeDB({"trail_on": "1", "moonbag_trail_pct": "0.20",
+                 "moonbag_inactivity_sec": "420"}, pos=pos)
+    _install_engine(db, sent, price=0.0016)
+    asyncio.run(engine._check(db.pos))
+    assert "closed_inactive" not in db.statuses(), db.updates
+
+    # 2) moonbag tua tapi txns m5 ramai → tetap open
+    sent = []
+    pos = _make_pos(ts=int(time.time()) - 600, tokens_left=250.0,
+                    tp1_done=1, tp2_done=1)
+    db = FakeDB({"trail_on": "1", "moonbag_trail_pct": "0.20",
+                 "moonbag_inactivity_sec": "420"}, pos=pos)
+    _install_engine(db, sent, price=0.0016)
+    orig = engine.current_pair
+    async def busy_pair(p):
+        return {"priceUsd": "0.0016", "priceNative": "0.001",
+                "liquidity": {"usd": 50000},
+                "txns": {"m5": {"buys": 12, "sells": 30}}}
+    engine.current_pair = busy_pair
+    try:
+        asyncio.run(engine._check(db.pos))
+    finally:
+        engine.current_pair = orig
+    assert "closed_inactive" not in db.statuses(), db.updates
+
+
+def test_moonbag_hardcap_45m_harvest_full():
+    """Moonbag umur >= 2700s → HARVEST FULL via timeout path (closed_timeout)."""
+    sent = []
+    pos = _make_pos(ts=int(time.time()) - 2800, tokens_left=250.0,
+                    tp1_done=1, tp2_done=1)
+    db = FakeDB({"trail_on": "1", "moonbag_trail_pct": "0.20",
+                 "moonbag_max_hold_sec": "2700"}, pos=pos)
+    _install_engine(db, sent, price=0.0016)
+    orig = engine.current_pair
+    async def active_pair(p):
+        return {"priceUsd": "0.0016", "priceNative": "0.001",
+                "liquidity": {"usd": 50000},
+                "txns": {"m5": {"buys": 5, "sells": 5}}}
+    engine.current_pair = active_pair
+    try:
+        asyncio.run(engine._check(db.pos))
+    finally:
+        engine.current_pair = orig
+    assert "closed_timeout" in db.statuses(), db.updates
+    assert any("HARVEST FULL" in s for s in sent), sent
+
+
+def test_moonbag_exempt_from_normal_time_stop():
+    """tanggung jawab reguler: max_hold_sec 420 tidak memukul moonbag (tp2_done=1)."""
+    sent = []
+    pos = _make_pos(ts=int(time.time()) - 500, tokens_left=250.0,
+                    tp1_done=1, tp2_done=1)
+    db = FakeDB({"max_hold_sec": "420", "trail_on": "1",
+                 "moonbag_trail_pct": "0.20",
+                 "moonbag_inactivity_sec": "420"}, pos=pos)
+    _install_engine(db, sent, price=0.0016)
+    orig = engine.current_pair
+    async def active_pair(p):
+        return {"priceUsd": "0.0016", "priceNative": "0.001",
+                "liquidity": {"usd": 50000},
+                "txns": {"m5": {"buys": 5, "sells": 5}}}
+    engine.current_pair = active_pair
+    try:
+        asyncio.run(engine._check(db.pos))
+    finally:
+        engine.current_pair = orig
+    assert "closed_timeout" not in db.statuses(), db.updates
+    assert "closed_inactive" not in db.statuses(), db.updates
     assert db.pos["status"] == "open", db.pos
 
 
@@ -309,6 +424,14 @@ if __name__ == "__main__":
     print("PASS lapis 3: jarak trailing moonbag 20% (bukan 25%)")
     test_layer3_no_tp_ceiling_on_moonbag()
     print("PASS lapis 3: moonbag bebas batas TP")
+    test_moonbag_inactivity_guard_exit_inactive()
+    print("PASS moonbag inactivity guard → closed_inactive")
+    test_moonbag_inactivity_guard_not_triggered_young_or_active()
+    print("PASS moonbag inactivity guard tidak salah picu")
+    test_moonbag_hardcap_45m_harvest_full()
+    print("PASS moonbag hard-cap 45m → HARVEST FULL")
+    test_moonbag_exempt_from_normal_time_stop()
+    print("PASS moonbag bebas time-stop biasa (420s)")
     test_config_defaults_and_labels()
     print("PASS config defaults & labels")
     test_db_migration_tp2_done()

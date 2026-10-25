@@ -26,6 +26,7 @@ def main_menu_text():
     st = "⏸ PAUSED" if db.paused() else "▶️ AKTIF"
     n_open = len(db.open_positions())
     n_src = len(db.sources(only_enabled=True))
+    stats = db.stats()
     if db.get("agent_dry_run", str) == "1":
         return (
             f"🤖 **hoodsniper v2**\n\n"
@@ -34,6 +35,8 @@ def main_menu_text():
             f"💵 Kas Virtual: **${db.get_paper_cash():.2f}** / "
             f"**${float(db.get('paper_initial_usd')):.2f}**\n"
             f"📊 Posisi Open: **{n_open}** | 📡 sources aktif: **{n_src}**\n"
+            f"🎯 TP1: {stats['tp1']} | 🎯 TP2: {stats['tp2']} | "
+            f"🛑 SL: {stats['sl']} | ⏱ Timeout: {stats['timeout']}\n"
             f"👛 Burner Live: `{_trader.addr}` ({bal:.5f} ETH)\n"
             f"💵 buy size: **${db.get('buy_usd'):.2f}**/call"
         )
@@ -43,6 +46,8 @@ def main_menu_text():
         f"👛 `{_trader.addr}`\n"
         f"⛽ saldo: **{bal:.6f} ETH**\n"
         f"📊 posisi open: **{n_open}** | 📡 sources aktif: **{n_src}**\n"
+        f"🎯 TP1: {stats['tp1']} | 🎯 TP2: {stats['tp2']} | "
+        f"🛑 SL: {stats['sl']} | ⏱ Timeout: {stats['timeout']}\n"
         f"💵 buy size: **${db.get('buy_usd'):.2f}**/call"
     )
 
@@ -70,9 +75,9 @@ async def positions_panel():
         if p.get("tp2_done"):
             status_tag = " · TP2✓ (🚀 Moonbag)"
         elif p["tp1_done"]:
-            status_tag = " · TP1✓"
+            status_tag = " · TP1✓ (⏳ OTW TP2)"
         else:
-            status_tag = ""
+            status_tag = " (⏳ OTW TP1)"
         lines.append(
             f"{emo} **{p['symbol']}** {pnl:+.1f}%{status_tag} _via {p['source_name']}_\n"
             f"   entry ${p['entry_price_usd']:.10f} | sisa {p['tokens_left']:,.0f}"
@@ -212,7 +217,9 @@ def stats_panel():
         "📈 **Stats**\n",
         f"📨 call terdeteksi: **{s['calls']}**",
         f"🟢 total buy: **{s['buys']}** (${s['spent']:.2f})",
-        f"📊 open: **{s['open']}** | 🎯 TP2: **{s['tp2']}** | 📈 trail: **{s['trail']}** | 🛑 SL: **{s['sl']}** | 🚨 rug: **{s['rug']}** | 👆 manual: **{s['manual']}** | 🧹 empty: **{s['empty']}**",
+        f"📊 open: **{s['open']}** | 🎯 TP1: **{s['tp1']}** | 🎯 TP2: **{s['tp2']}** | "
+        f"🛑 SL: **{s['sl']}** | ⏱ Timeout: **{s['timeout']}**",
+        f"📈 trail: **{s['trail']}** | 🚨 rug: **{s['rug']}** | 👆 manual: **{s['manual']}** | 🧹 empty: **{s['empty']}**",
         f"⛽ ETH keluar (incl. gas buy): {s['eth_in']:.6f} | ETH balik (real): {s['eth_out']:.6f}",
         f"💰 PnL realized: **{pnl_eth:+.6f} ETH**",
     ]
