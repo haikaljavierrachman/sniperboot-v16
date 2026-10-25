@@ -520,8 +520,9 @@ try:
     check("pipa ASLI: tokens_total 4000 (dari QUOTE)",
           abs(pos_row["tokens_total"] - 4000.0) < 1e-6,
           f"got {pos_row['tokens_total']}")
-    check("pipa ASLI: entry = 5/4000 (on-chain)",
-          abs(pos_row["entry_price_usd"] - 5.0 / 4000.0) < 1e-12,
+    _spread = float(db.get("paper_entry_spread_pct", float) or 0.025)
+    check("pipa ASLI: entry = (5/4000) * (1+paper_entry_spread_pct) (on-chain, after spread)",
+          abs(pos_row["entry_price_usd"] - (5.0 / 4000.0) * (1.0 + _spread)) < 1e-12,
           f"got {pos_row['entry_price_usd']}")
     check("pipa ASLI: kas terpotong (modal+gas)",
           db.get_paper_cash() < cash_b)

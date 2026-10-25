@@ -610,6 +610,10 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         # entry efektif RIIL: hasil quote on-chain (termasuk price impact)
         tokens_total = amt_raw / (10 ** dec)
         entry_price_usd = (buy_usd / tokens_total) if tokens_total > 0 else 0
+        # Friksi realistis: spread entry (latency broadcast antrean sequencer
+        # + fee pool DEX) — koin wajib naik +2.5% dulu untuk breakeven.
+        spread = float(db.get("paper_entry_spread_pct", float) or 0.025)
+        entry_price_usd = entry_price_usd * (1.0 + spread)
         if tokens_total <= 0 or entry_price_usd <= 0:
             await _notify(
                 f"❌ **SIMULASI BUY GAGAL (On-Chain Revert)** via {src['name']}\n"
@@ -681,7 +685,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         buy_usd_final = buy_usd
         # Biaya nyata: gas L2 per swap + modal koin. Gas dipotong kas
         # virtual di samping modal, dicatat terpisah di notifikasi.
-        gas_eth_buy = float(db.get("paper_gas_eth", float) or 0.00005)
+        gas_eth_buy = float(db.get("paper_gas_eth", float) or 0.0001)
         gas_usd = gas_eth_buy * eth_price if eth_price > 0 else 0.12
         total_buy_cost = buy_usd_final + gas_usd
         if not db.deduct_paper_cash(total_buy_cost):

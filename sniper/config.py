@@ -10,7 +10,7 @@ def _i(key, default):
     return int(v)
 
 # ---- Chain / RPC ----
-RPC_URL       = os.getenv("RPC_URL", "https://rpc.mainnet.chain.robinhood.com")
+RPC_URL       = os.getenv("RPC_URL", "https://robinhood-rpc.publicnode.com")
 CHAIN_ID      = _i("CHAIN_ID", 4663)
 PRIVATE_KEY   = os.getenv("PRIVATE_KEY", "")
 
@@ -56,13 +56,13 @@ DB_PATH = os.getenv("DB_PATH", "hoodsniper.db")
 SETTING_DEFAULTS = {
     "buy_usd":        "5.0",
     # ---- 🧪 Paper trading: biaya transaksi nyata (identik mainnet) ----
-    # Gas per swap di Robinhood Chain L2 + fee pool/slippage DEX 1.0%.
-    "paper_gas_eth":       "0.00005",
-    "paper_slippage_pct":  "0.01",
-    # Spread entry: harga beli didorong naik oleh price impact + fee pool
-    # DEX (Parasit Uniswap: beli mendorong harga). Koin wajib naik +1.0%
-    # dulu untuk mencapai titik impas (breakeven).
-    "paper_entry_spread_pct": "0.01",
+    # Gas per swap di Robinhood Chain L2 + fee pool DEX & slippage nyata.
+    "paper_gas_eth":       "0.0001",
+    "paper_slippage_pct":  "0.02",
+    # Spread entry: harga beli didorong naik oleh latency broadcast
+    # (300-500ms / 5-8 blok pump +1..3%) + price impact + fee pool DEX.
+    # Koin wajib naik +2.5% dulu untuk mencapai titik impas (breakeven).
+    "paper_entry_spread_pct": "0.025",
     "tp1":            "0.50",
     "tp2":            "1.00",
     "sl":             "-0.30",

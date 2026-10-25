@@ -86,14 +86,14 @@ def open_sim_position(pair, decision=None):
     buy_usd = (db.get("buy_usd") * decision["size_mult"]) if decision else db.get("buy_usd")
     # listener: estimasi gas + potong kas virtual (modal + gas) dulu;
     # gagal → posisi TIDAK dibuka
-    gas_eth = float(db.get("paper_gas_eth", float) or 0.00005)
+    gas_eth = float(db.get("paper_gas_eth", float) or 0.0001)
     gas_usd = gas_eth * eth_price if eth_price > 0 else 0.12
     total_buy_cost = buy_usd + gas_usd
     if not db.deduct_paper_cash(total_buy_cost):
         return None
     eth_spent = buy_usd / eth_price if eth_price > 0 else 0.0003
     # listener: spread entry (price impact DEX) naikkan harga masuk
-    spread = float(db.get("paper_entry_spread_pct", float) or 0.01)
+    spread = float(db.get("paper_entry_spread_pct", float) or 0.025)
     entry_price_usd = float(pair.get("priceUsd") or 0) * (1.0 + spread)
     tokens_total = buy_usd / entry_price_usd if entry_price_usd > 0 else 0
     pos = {"ca": pair["baseToken"]["address"].lower(), "symbol": "TESTSIM",
@@ -132,9 +132,10 @@ check("tokens_left = tokens_total",
       prow["tokens_total"] > 0 and prow["tokens_left"] == prow["tokens_total"])
 
 usd = db.get("buy_usd") * dec["size_mult"]
+spread_db = float(db.get("paper_entry_spread_pct", float) or 0.025)
 check("usd_spent = buy_usd * size_mult", abs(prow["usd_spent"] - usd) < 1e-6)
-check("tokens_total = buy_usd / entry (entry = 0.001 * 1.01 spread)",
-      abs(prow["tokens_total"] - usd / (0.001 * 1.01)) < 1e-6)
+check("tokens_total = buy_usd / entry (entry = 0.001 * (1+spread))",
+      abs(prow["tokens_total"] - usd / (0.001 * (1.0 + spread_db))) < 1e-6)
 
 print("\n[--] posisi nyata default is_simulated=0")
 db.open_position(**{"ca": "0x" + "11" * 20, "symbol": "REALONE",
@@ -245,14 +246,14 @@ check("reset kas → $100.00", db.get_paper_cash() == 100.0
       and float(db.get("paper_initial_usd")) == 100.0)
 
 # biaya standar dari setting (sesuai instruksi baru)
-gas_eth = float(db.get("paper_gas_eth", float) or 0.00005)
-slip = float(db.get("paper_slippage_pct", float) or 0.01)
-check("SETTING_DEFAULTS paper_gas_eth=0.00005",
-      config.SETTING_DEFAULTS.get("paper_gas_eth") == "0.00005")
-check("SETTING_DEFAULTS paper_slippage_pct=0.01",
-      config.SETTING_DEFAULTS.get("paper_slippage_pct") == "0.01")
-check("SETTING_DEFAULTS paper_entry_spread_pct=0.01",
-      config.SETTING_DEFAULTS.get("paper_entry_spread_pct") == "0.01")
+gas_eth = float(db.get("paper_gas_eth", float) or 0.0001)
+slip = float(db.get("paper_slippage_pct", float) or 0.02)
+check("SETTING_DEFAULTS paper_gas_eth=0.0001",
+      config.SETTING_DEFAULTS.get("paper_gas_eth") == "0.0001")
+check("SETTING_DEFAULTS paper_slippage_pct=0.02",
+      config.SETTING_DEFAULTS.get("paper_slippage_pct") == "0.02")
+check("SETTING_DEFAULTS paper_entry_spread_pct=0.025",
+      config.SETTING_DEFAULTS.get("paper_entry_spread_pct") == "0.025")
 check("SETTING_DEFAULTS buy_usd naik ke 5.0",
       config.SETTING_DEFAULTS.get("buy_usd") == "5.0")
 gas_usd = gas_eth * 2400.0  # contoh skala: ETH $2400 → $0.12 (dipakai di luar fixture)
@@ -279,9 +280,9 @@ db.deduct_paper_cash(buy_usd_n + buy_gas_n)
 gross = max(buy_usd_n * (1.0 - slip), 0.0)
 net = max(gross - buy_gas_n, 0.0)
 new = db.add_paper_cash(net)
-check(f"impas 0% PnL: kas balik {net:.4f} (5.0*0.99 - gas) — rugi net = biaya bolak-balik+fee",
+check(f"impas 0% PnL: kas balik {net:.4f} (5.0*(1-slip) - gas) — rugi net = biaya bolak-balik+fee",
       abs(new - (100.0 - buy_usd_n - buy_gas_n + net)) < 1e-9
-      and abs(net - (5.0 * 0.99 - buy_gas_n)) < 1e-9)
+      and abs(net - (5.0 * (1.0 - slip) - buy_gas_n)) < 1e-9)
 
 # ===== sell +300% (liq ETH nyata) — kas balik kurangi slip & gas =====
 db.reset_paper_cash(100.0)
@@ -290,8 +291,8 @@ _user_pnl = 2.0  # +200% disimulasikan via cost*(1+pnl)
 gross3 = max(buy_usd_n * (1.0 + _user_pnl) * (1.0 - slip), 0.0)
 net3 = max(gross3 - buy_gas_n, 0.0)
 new3 = db.add_paper_cash(net3)
-check("+200%: kas balik net = 15.0*0.99 - gas",
-      abs(net3 - (15.0 * 0.99 - buy_gas_n)) < 1e-9
+check("+200%: kas balik net = 15.0*(1-slip) - gas",
+      abs(net3 - (15.0 * (1.0 - slip) - buy_gas_n)) < 1e-9
       and abs(new3 - (100.0 - buy_usd_n - buy_gas_n + net3)) < 1e-9)
 
 # Simulasi sell TP1 (+50%): jual $5.0 modal → kas balik net (slip 1% & gas jual)
@@ -321,11 +322,11 @@ check("open posisi simulasi + kas virtual terpotong modal+gas",
 pid3x = db.position(pid3)
 # spread entry: harga masuk posisi harus lebih tinggi 1% dari harga layar pair
 raw_screen = float(p3.get("priceUsd") or 0)
-check("entry_price_usd = priceUsd * 1.01 (spread entry 1%)",
-      abs(pid3x["entry_price_usd"] - raw_screen * 1.01) < 1e-15
+check("entry_price_usd = priceUsd * (1+spread) (spread entry)",
+      abs(pid3x["entry_price_usd"] - raw_screen * (1.0 + spread_db)) < 1e-15
       and pid3x["entry_price_usd"] > raw_screen)
-check("entry price tinggi 1% dari harga layar pair",
-      abs(pid3x["entry_price_usd"] / raw_screen - 1.01) < 1e-9)
+check("entry price lebih tinggi dari harga layar pair sesuai spread setting",
+      abs(pid3x["entry_price_usd"] / raw_screen - (1.0 + spread_db)) < 1e-9)
 sold_usd = pid3x["usd_spent"] * (pid3x["tokens_total"] * 0.5 / pid3x["tokens_total"])
 # jual 50% pada +60% (real_pnl berdasar eth_real/cost_eth) → kas balik > modal yang terjual
 # (dihitung penuh di uji [3]; di sini cukup cek kas balik menaikkan saldo)

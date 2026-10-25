@@ -142,10 +142,10 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
         try:
             cost_usd = pos["usd_spent"] * (sold / pos["tokens_total"]) if pos["tokens_total"] else 0
             # 🧪 biaya nyata: potong slippage/fee pool DEX (paper_slippage_pct)
-            slippage = float(db.get("paper_slippage_pct", float) or 0.01)
+            slippage = float(db.get("paper_slippage_pct", float) or 0.02)
             gross_usd = max(cost_usd * (1.0 + real_pnl) * (1.0 - slippage), 0.0)
             # 🧪 gas jual (L2): harga ETH dihitung dari pair saat ini
-            gas_eth_sell = float(db.get("paper_gas_eth", float) or 0.00005)
+            gas_eth_sell = float(db.get("paper_gas_eth", float) or 0.0001)
             eth_price_now = (price / price_native) if price_native > 0 else 0.0
             gas_sell_usd = gas_eth_sell * eth_price_now if eth_price_now > 0 else 0.12
             net_returned_usd = max(gross_usd - gas_sell_usd, 0.0)

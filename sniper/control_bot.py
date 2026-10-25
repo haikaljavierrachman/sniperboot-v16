@@ -142,7 +142,7 @@ def settings_panel():
         f"• Min Liquidity: **${db.get('scanner_min_liq', str)}**",
         f"• Max Market Cap: **${db.get('scanner_mcap_max', str)}**",
         f"• Dev Max: **{db.get('dev_max_pct', str)}%** · Top 10 Max: **{db.get('top10_max_pct', str)}%**",
-        f"• Gas L2: **-${db.get('paper_gas_eth', float)*2400:.2f}** · Spread DEX: **1%**",
+        f"• Gas L2: **-{db.get('paper_gas_eth', float)*2400:.2f}** · Spread entry (breakeven): **2.5%** · Slippage: **2%**",
     ]
     buttons = [
         [Button.inline(f"💵 Buy (${buy_val})", b"set:buy_usd"),
