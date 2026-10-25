@@ -175,6 +175,21 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     # Jika posisi copy-trade dari wallet insider (caller_name INSIDER:*),
     # laporkan hasil exit-nya ke tabel insider_wallets: SL = loss_count
     # (2x berturut → wallet auto-disabled), TP = win_count reset loss.
+    # ---------- 🛡️ clone-guard: tandai family gagal (v16.6) ----------
+    # Posisi ditutup dengan reason 'rug' ATAU ('sl' dengan pnl <= -0.25)
+    # → tandai seluruh keluarga klon/deployer (template fingerprint +
+    # operator funder graph) sebagai gagal, agar CA saudara tidak
+    # dibeli lagi.
+    if is_close and (reason == "rug" or (reason == "sl" and real_pnl <= -0.25)):
+        try:
+            from . import clone_guard as _cg
+            reason_txt = f"{reason} pnl {real_pnl*100:+.0f}%"
+            print(f"[clone_guard] 🏷️ tandai keluarga gagal: {pos['symbol']} "
+                  f"({pos['ca'][:10]}…) — {reason_txt}")
+            _cg.mark_family_failed(pos["ca"], reason_txt)
+        except Exception:
+            pass
+
     if is_close:
         c_name = str(pos.get("caller_name") or "")
         c_id = str(pos.get("caller_id") or "")

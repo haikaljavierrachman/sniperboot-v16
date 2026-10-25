@@ -32,11 +32,59 @@ def _get(path, params=None):
     return r.json()
 
 
-def creator_of(ca: str):
-    """Alamat deployer kontrak token (None kalau tidak ketahuan)."""
+def creator_of(ca: str, cache: bool = True):
+    """Alamat deployer ASLI kontrak token (EOA pembuat creation tx).
+
+    Jangan pakai /addresses/{ca}.creator_address_hash — untuk token
+    launchpad (Pons) itu adalah KONTRAK ROUTER/LAUNCHER, bukan deployer
+    manusia (terbukti probe Marvin #1..#3: ketiganya menunjuk ke router
+    0x1cbaF24D...). Jalur benar (terverifikasi):
+      1. /addresses/{ca}             -> creation_transaction_hash
+      2. /transactions/{creation_tx} -> from = EOA deployer
+
+    Hasil dicache ke tabel deployer_registry (clone_guard) supaya tidak
+    membanjiri Blockscout tiap kali dipanggil. None kalau tidak ketahuan.
+    """
+    import time as _t
+    ca = (ca or "").strip()
+    if not ca.lower().startswith("0x"):
+        return None
+    ca = ca.lower()
+    # ---- cache lookup (fresh < 14 hari) ----
+    if cache:
+        try:
+            from . import clone_guard as _cg
+            row = _cg.get_registry(ca)
+            if row and row.get("deployer"):
+                if _t.time() - (row.get("ts") or 0) < 14 * 86400:
+                    return row["deployer"]
+        except Exception:
+            pass
     try:
         d = _get(f"/addresses/{ca}")
-        return d.get("creator_address_hash")
+        creation_tx = (d or {}).get("creation_transaction_hash")
+        if not creation_tx:
+            return None
+        tx = _get(f"/transactions/{creation_tx}")
+        dev = ((tx or {}).get("from") or {}).get("hash")
+        dev = dev.lower() if dev else None
+        # ---- isi cache (best-effort, tanpa fetch tambahan) ----
+        if cache and dev:
+            try:
+                from . import clone_guard as _cg
+                with db._lock, db._conn() as c:
+                    _cg._init_tables(c)
+                    c.execute("""INSERT INTO deployer_registry
+                        (ca,deployer,template_fp,symbol,name,total_supply,funders,status,reason,ts)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(ca) DO UPDATE SET
+                            deployer = COALESCE(excluded.deployer, deployer),
+                            ts = CASE WHEN excluded.deployer IS NOT NULL
+                                      THEN excluded.ts ELSE ts END""",
+                        (ca, dev, None, "", "", "", "", "ok", "", int(_t.time())))
+            except Exception:
+                pass
+        return dev
     except Exception:
         return None
 
@@ -174,6 +222,25 @@ def check(trader, ca: str, pair) -> tuple[bool, str]:
     if not audit_ok:
         return False, f"audit kontrak gagal: {audit_msg}"
     audit_note = audit_msg.split("(", 1)[0].strip()  # ringkas untuk catatan sukses
+
+    # ---- 🛡️ clone / operator-family guard (v16.6) ----
+    # SETELAH audit kontrak, SEBELUM cek dev/top10.
+    # Guard ini WAJIB nol-latency: `is_clone_risk()` 100% DB-only, sedangkan
+    # pengisian data on-chain (fingerprint/deployer/funder) dijalankan
+    # `register_async()` di background. Kalau dipaksa sinkron, entry tertunda
+    # 18-32 detik (terukur) dan koin sudah kabur.
+    try:
+        from . import clone_guard as _cg
+        _bt = (pair or {}).get("baseToken") or {}
+        _sym = _bt.get("symbol") or ""
+        _nm = _bt.get("name") or ""
+        clone_risk, clone_reason = _cg.is_clone_risk(ca, symbol=_sym, name=_nm)
+        if clone_risk:
+            return False, f"clone guard: {clone_reason}"
+        _cg.register_async(ca, symbol=_sym, name=_nm)
+    except Exception as e:
+        print(f"[safety] ⚠️ clone_guard gagal dijalankan (fail-open): "
+              f"{e.__class__.__name__}: {e}")
 
     max_dev = db.get("dev_max_pct")
     max_top = db.get("top10_max_pct")

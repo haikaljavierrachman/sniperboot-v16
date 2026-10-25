@@ -199,6 +199,41 @@ def fetch_early_buyers(ca: str, max_buyers=50) -> list[dict]:
     return out
 
 
+def fetch_gecko_buyers(ca: str, max_pools: int = 3) -> list[dict]:
+    """Korborasi pembeli awal via GeckoTerminal (sumber kedua, v16.6).
+
+    Blockscout TIDAK bisa dibantu Etherscan (403 Cloudflare di robin.
+    etherscan.io; API key gratis tidak dukung chainid=4663) → pakai
+    GeckoTerminal network `robinhood` (gratis, tanpa API key).
+    Return list dict {wallet, usd, price_usd, ts} untuk trade buy.
+    Semua kegagalan → [] (jangan raise).
+    """
+    try:
+        from sniper import geckoterminal as gt
+    except ImportError:                       # pragma: no cover
+        return []
+    out = []
+    try:
+        pools = gt.pools_of(ca)[:max_pools]
+    except Exception:
+        return []
+    for pool in pools:
+        try:
+            trades = gt.trades(pool)
+        except Exception:
+            trades = []
+        for t in trades:
+            if t.get("side") != "buy":
+                continue
+            w = (t.get("wallet") or "").lower()
+            if not w.startswith("0x") or w in QUOTE_ASSETS:
+                continue
+            out.append({"wallet": w, "usd": float(t.get("usd") or 0),
+                        "price_usd": float(t.get("price_usd") or 0),
+                        "ts": int(t.get("ts") or 0)})
+    return out
+
+
 def pick_buyers(transfers: list) -> list[str]:
     """Ambil alamat penerima (to) yang BUKAN kontrak router/launchpad.
        Biasanya trader EOA yang membeli (dari router → trader)."""
@@ -225,17 +260,50 @@ def pick_buyers(transfers: list) -> list[str]:
 
 # ---------- 2. KERUCUT-KERUCUT PENDINGIN ----------
 
-def cross_check(winners_cas: list) -> list[tuple[str, int, list]]:
+def cross_check(winners_cas: list, gecko_bonus: bool = True) -> list[tuple[str, int, list]]:
     """Set intersection: wallet yang muncul di ≥2 koin pemenang.
-       Return list sorted (address, win_count, [ca...])."""
-    owners = defaultdict(list)
+
+    v16.6 bobot keyakinan (Blockscout primary + GeckoTerminal korborasi):
+      - muncul di Blockscout SAJA        = 1 poin per koin
+      - muncul di Blockscout + GeckoTerminal = 2 poin per koin
+    Return list sorted (address, score, [ca...]).
+    """
+    owners = defaultdict(list)                    # addr -> [ca, ...]
+    sources = defaultdict(set)                    # (addr, ca) -> {'bs','gt'}
     for ca in winners_cas:
-        for buyer in pick_buyers(fetch_early_buyers(ca)):
+        bs_buyers = pick_buyers(fetch_early_buyers(ca))
+        gecko_wallets: set[str] = set()
+        if gecko_bonus:
+            try:
+                gecko_wallets = {g["wallet"] for g in fetch_gecko_buyers(ca)}
+            except Exception:
+                gecko_wallets = set()
+        for buyer in bs_buyers:
             owners[buyer].append(ca)
-    result = [
-        (addr, len(cas), cas)
-        for addr, cas in owners.items() if len(set(cas)) >= 2
-    ]
+            sources[(buyer, ca)].add("blockscout")
+        # korborasi: tambahkan sumber ke wallet yang SUDAH ada di Blockscout.
+        # Wallet GeckoTerminal-only (tidak di Blockscout) diabaikan — source
+        # primary tetap Blockscout agar tidak fantom/duplikat.
+        for w in gecko_wallets:
+            if w in bs_buyers or (w, ca) in sources:
+                sources[(w, ca)].add("geckoterminal")
+    result = []
+    for addr, cas in owners.items():
+        distinct = list(dict.fromkeys(cas))
+        score = 0
+        seen = set()
+        for ca in distinct:
+            key = (addr, ca)
+            if key not in sources or key in seen:
+                continue
+            seen.add(key)
+            srcs = sources[key]
+            # Blockscout saja = 1 poin; dua sumber = 2 poin
+            score += 2 if "blockscout" in srcs and "geckoterminal" in srcs else 1
+        # GeckoTerminal-only wallet (tidak di Blockscout) tidak dihitung —
+        # masih wajib ada di source primary agar tidak duplikat/fantom.
+        if len(distinct) >= 2 and score >= 2:
+            result.append((addr, score, distinct))
     result.sort(key=lambda x: (-x[1], x[0]))
     return result
 
@@ -243,7 +311,7 @@ def cross_check(winners_cas: list) -> list[tuple[str, int, list]]:
 # ---------- 3. SIMPAN KE DB ----------
 
 def persist(winner_rows: list, dry=False):
-    """Simpan wallet kandidat: win_count naik beruntun, tidak menimpa."""
+    """Simpan wallet kandidat: win_count/score naik beruntun, tidak menimpa."""
     for addr, cnt, cas in winner_rows:
         win_cas = ",".join(cas)
         if dry:
@@ -251,7 +319,7 @@ def persist(winner_rows: list, dry=False):
             continue
         db.add_insider_wallet(
             addr, label="screen_insiders", win_count=cnt,
-            notes="auto: korelasi koin pemenang",
+            notes="auto: blockscout+geckoterminal",
             win_cas=win_cas, update_if_exists=True)
         print(f"✅ insider {addr[:14]}… win_count +{cnt} (CA: {win_cas[:60]}…)")
 
