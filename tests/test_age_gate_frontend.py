@@ -74,9 +74,13 @@ def test_fail_open_bad_created():
 
 
 def test_silent_age_tags():
-    assert should_notify_fast_skip("age_8091099s") is False
-    assert should_notify_fast_skip("age_187s") is False
-    print("PASS notif age_* → SENYAP")
+    # v16.8: age_* TIDAK lagi silent (user pilih tampilkan); tag tetap
+    # harus benar-benar mulai dengan "age_" supaya filter tak salah sasaran.
+    assert "age_8091099s".startswith("age_")
+    assert "age_187s".startswith("age_")
+    assert should_notify_fast_skip("age_8091099s") is True
+    assert should_notify_fast_skip("age_187s") is True
+    print("PASS notif age_* → NOTIFY (v16.8, anti-silent)")
 
 
 def test_notify_other_tags():

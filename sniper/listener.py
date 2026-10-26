@@ -339,7 +339,9 @@ def goldilocks_eval(pair) -> tuple[bool, str, dict]:
 
 
 # Penolakan yang sudah pasti & tidak bisa ditindaklanjuti -> jangan spam.
-SILENT_FAST_SKIP_PREFIXES = ("age_",)
+# v16.8: "age_" TIDAK lagi silent — user minta lihat notif SKIP umur juga.
+# Anti-spam naif: rate-limit global di _notify (min jeda antar notif).
+SILENT_FAST_SKIP_PREFIXES = ()
 
 
 def should_notify_fast_skip(tag: str) -> bool:

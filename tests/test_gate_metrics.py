@@ -115,8 +115,8 @@ def test_metrics_on_dev_fail_has_dev_pct():
 
 
 def test_silent_age_tags():
-    assert should_notify_fast_skip("age_8091099s") is False
-    assert should_notify_fast_skip("age_187s") is False
+    assert should_notify_fast_skip("age_8091099s") is True   # v16.8: tampilkan
+    assert should_notify_fast_skip("age_187s") is True
     print("PASS notif age_* → SENYAP")
 
 
