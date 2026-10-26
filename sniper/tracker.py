@@ -1,10 +1,17 @@
-"""🕵️ INSIDER TRACKER (v16.1) — listener copy-trade on-chain.
+"""🕵️ INSIDER TRACKER (v16.1/v16.8) — intel insider on-chain, ALERT-ONLY.
 
 Sumber sinyal KETIGA HoodSniper: memantau transaksi blok baru di Robinhood
 Chain (chainId 4663), mengecek apakah pengirimnya wallet insider (hasil
 screening tools/screen_insiders.py, tersimpan di tabel insider_wallets),
-lalu kalau insider itu memanggil SwapRouter02 untuk BUY token → dikirim ke
-pipa bot yang sama (listener.process_ca, allow_buy=True).
+lalu kalau insider itu memanggil SwapRouter02 untuk BUY token →
+Kirim NOTIF TELEGRAM RINGKAS (wallet, simbol+CA, mcap/liq, chart) seperti
+intel pasar — TANPA masuk pipa listener.
+
+Mode setting `insider_alert_only`:
+  "1" (DEFAULT) = ALERT-ONLY — tidak ada posisi baru, tidak ada evaluasi
+      buy, tidak print listener. Notif via listener._notify / bind_notify.
+  "0" = perilaku LAMA — CA diteruskan ke pipa bot yang sama
+      (listener.process_ca, allow_buy=True).
 
 Desain:
 - Async loop INDEPENDEN (task background bot.py), on/off via setting tracker_on.
@@ -187,24 +194,115 @@ def _src() -> dict:
             "name": "INSIDER_TRACKER", "mcap_max": 50000}
 
 
-async def process_insider_buy(token_ca: str, insider_addr: str = "", notify=None):
-    """Kirim CA koin yang dibeli insider ke pipa bot (sama seperti sinyal
-       scanner): listener.process_ca dengan src yang tepat.
+def _short_wallet(addr: str, labels: dict = None) -> str:
+    """Label singkat wallet: label DB bila ada, kalau tidak 0xabc…def."""
+    a = (addr or "").lower()
+    if labels and a in labels:
+        return labels[a]
+    return f"{a[:6]}…{a[-4:]}" if len(a) >= 10 else (a or "?")
 
-       insider_addr = alamat wallet insider pemicu (bila ada) — di-embed ke
-       caller_id/caller_name posisi trade agar hasil exit (TP/SL) bisa
-       dikembalikan ke skor wallet-nya (db.record_insider_result).
+
+def _insider_labels(addrs) -> dict:
+    """Map address → label DB (insider_wallets), untuk notif alert."""
+    labels = {}
+    try:
+        for row in db.list_insiders():
+            addr = (row.get("address") or "").lower()
+            label = (row.get("label") or "").strip()
+            if addr and label and addr in addrs:
+                labels[addr] = label
+    except Exception:
+        pass
+    return labels
+
+
+def _fmt_usd_compact(v) -> str:
+    """$812 / $3.1k / $1.2M — '?' bila tak tersedia."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "?"
+    if v >= 1_000_000:
+        return f"${v / 1_000_000:.1f}M"
+    if v >= 1000:
+        s = f"${v / 1000:.1f}k"
+        return s.replace(".0k", "k")
+    return f"${v:,.0f}"
+
+
+def _insider_alert_text(pair, ca, wallet_label: str) -> str:
+    """Teks notif alert insider — maks 6 baris, tanpa emoji jualan."""
+    sym = (pair.get("baseToken") or {}).get("symbol", "?") if pair else "?"
+    mcap = dx.mcap_of(pair) if pair else 0
+    liq = dx.liq_usd_or_none(pair) if pair else None
+    pair_addr = (pair or {}).get("pairAddress", "")
+    chain = (pair or {}).get("chainId") or "robinhood"
+    chart = f"https://dexscreener.com/{chain}/{pair_addr}" if pair_addr else ""
+    lines = [
+        "🕵️ **INSIDER BUY — {}**".format(sym),
+        f"wallet `{wallet_label}`",
+        f"`{ca}`",
+        f"📊 mcap {_fmt_usd_compact(mcap)} · liq {_fmt_usd_compact(liq) if liq is not None else 'n/a'}",
+    ]
+    if chart:
+        lines.append(f"📈 {chart}")
+    return "\n".join(lines)
+
+
+def _deliver_alert(text: str):
+    """Kirim alert via listener._notify bila ada; fallback → callback global
+    tracker (bind_notify dari bot.py). Detached task — tracker loop tidak
+    menunggu notif selesai. Tidak boleh raise."""
+    cb = getattr(listener, "_notify", None) or _notify_cb
+    if cb is None:
+        print(f"[insider] (alert tak terkirim — notify belum terikat)\n{text}")
+        return
+    try:
+        asyncio.create_task(cb(text))
+    except Exception as e:
+        print(f"[insider] notify fail: {e}")
+
+
+async def process_insider_buy(token_ca: str, insider_addr: str = "",
+                              notify=None, pair=None):
+    """Insider membeli token (deteksi _inspect_block/_inspect_logs).
+
+    Mode insider_alert_only=1 (DEFAULT): kirim notif Telegram RINGKAS
+    (wallet, simbol+CA, mcap/liq, chart) — TANPA masuk pipa listener
+    (0 evaluasi buy, 0 posisi baru, 0 RPC tambahan: pair berasal dari
+    respons Dexscreener _inspect_block yang sudah ada).
+
+    Mode insider_alert_only=0: perilaku LAMA — CA diteruskan ke
+    listener.process_ca (allow_buy=True, siklus penuh sinyal scanner).
+
+    `pair` opsional: respons dx.best_pair dari caller (hemat 1 fetch).
     """
-    src = _src()
-    print(f"[insider] CA to pipeline: {token_ca}")
-    caller_id = insider_addr.lower() if insider_addr else None
-    caller_name = (f"INSIDER:{insider_addr[:10]}"
-                   if insider_addr else "INSIDER_TRACKER")
-    # Pipa listener.process_ca async — panggil via task supaya tracker tidak
-    # memblokir loop pemantauan blok.
-    asyncio.create_task(listener.process_ca(
-        token_ca, src, caller_id=caller_id, caller_name=caller_name,
-        allow_buy=True))
+    alert_only = (db.get("insider_alert_only", str) or "1") == "1"
+    if not alert_only:
+        # ---------- Perilaku lama (fallback aman) ----------
+        src = _src()
+        print(f"[insider] CA to pipeline: {token_ca}")
+        caller_id = insider_addr.lower() if insider_addr else None
+        caller_name = (f"INSIDER:{insider_addr[:10]}"
+                       if insider_addr else "INSIDER_TRACKER")
+        # Pipa listener.process_ca async — panggil via task supaya tracker
+        # tidak memblokir loop pemantauan blok.
+        asyncio.create_task(listener.process_ca(
+            token_ca, src, caller_id=caller_id, caller_name=caller_name,
+            allow_buy=True))
+        return
+    # ---------- Alert-only (v16.8, KORI 1) ----------
+    if pair is None:
+        try:
+            pair = await asyncio.to_thread(dx.best_pair, token_ca)
+        except Exception:
+            pair = None
+    labels = _insider_labels({insider_addr.lower()} if insider_addr else set())
+    wallet_label = _short_wallet(insider_addr, labels)
+    text = _insider_alert_text(pair, token_ca, wallet_label)
+    print(f"[insider] ALERT (alert-only): {wallet_label} beli "
+          f"{token_ca[:10]}… — dikirim ke Telegram, TIDAK masuk pipa.")
+    _deliver_alert(text)
 
 
 # ============================ SCAN BLOK ============================
@@ -276,18 +374,19 @@ async def _inspect_block(w3, block_number: int):
         # Karena tracker REAKTIF (tanpa cache harga), cukup cek priceChange m5
         # Dexscreener — kalau harga sudah lari tajam, lewati (insider buy di
         # awal; kita ikut di harga biasanya sudah naik).
+        pair = None
         try:
             pair = await asyncio.to_thread(dx.best_pair, token_out)
-            # 🔒 Gate UMUR POOL di depan (data pairCreatedAt sudah ada di
-            # respons `pair` ini — 0 request jaringan tambahan). Pool umur
-            # > goldilocks_max_age_sec jelas bukan launch baru; jangan buang
-            # waktu ke safety.check on-chain yang MAHAL.
-            max_age = float(db.get("goldilocks_max_age_sec", float) or 300)
-            too_old, age = pool_too_old(pair, max_age)
-            if too_old:
-                print(f"[tracker] skip {token_out[:10]}… umur {age:.0f}s > "
-                      f"{max_age:.0f}s (bukan launch baru)")
-                continue
+            # 🔒 Gate UMUR POOL — HANYA jalur legacy (insider_alert_only=0,
+            # sniper butuh launch baru). Jalur alert-only TIDAK membuang
+            # token berumur: paus beli koin lama = intel tetap dikirim.
+            if (db.get("insider_alert_only", str) or "1") != "1":
+                max_age = float(db.get("goldilocks_max_age_sec", float) or 300)
+                too_old, age = pool_too_old(pair, max_age)
+                if too_old:
+                    print(f"[tracker] skip {token_out[:10]}… umur {age:.0f}s > "
+                          f"{max_age:.0f}s (legacy: bukan launch baru)")
+                    continue
             pc = (((pair or {}).get("priceChange") or {}).get("m5")) or 0.0
             if float(pc) > MAX_SLIP_PCT:
                 print(f"[tracker] beta pusing: 'insider buy {token_out[:10]}… "
@@ -296,7 +395,8 @@ async def _inspect_block(w3, block_number: int):
         except Exception:
             pass  # tebusan data harga gagal → jangan block-trade
         try:
-            await process_insider_buy(token_out, insider_addr=frm)
+            await process_insider_buy(token_out, insider_addr=frm,
+                                      pair=pair)
             sent += 1
         except Exception as e:
             print(f"[tracker] process_insider_buy fail: {e}")
@@ -355,6 +455,7 @@ async def _inspect_logs(w3, from_block: int, to_block: int) -> int:
         if insider_addr not in insiders:
             continue
         # 🔒 slippage guard: harga sudah lari >MAX_SLIP_PCT% → skip
+        pair = None
         try:
             pair = await asyncio.to_thread(dx.best_pair, token_ca)
             pc = (((pair or {}).get("priceChange") or {}).get("m5")) or 0.0
@@ -366,7 +467,8 @@ async def _inspect_logs(w3, from_block: int, to_block: int) -> int:
         except Exception:
             pass  # data harga gagal → jangan block-trade
         try:
-            await process_insider_buy(token_ca, insider_addr=insider_addr)
+            await process_insider_buy(token_ca, insider_addr=insider_addr,
+                                      pair=pair)
             seen_tokens.add(token_ca)
             sent += 1
         except Exception as e:

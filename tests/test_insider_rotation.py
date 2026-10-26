@@ -111,14 +111,63 @@ def test_record_normalizes_case_and_unknown():
 
 
 # =========================================================
-# 2. Alur _inspect_block → caller_id tersimpan di posisi trade
+# 2. Alur _inspect_block → perilaku mode (alert-only vs legacy pipa)
 # =========================================================
 
-def test_inspect_block_embeds_insider_addr():
-    """Tx buy insider → process_insider_buy dipanggil dengan insider_addr=frm."""
+def test_inspect_block_alert_only_no_pipeline():
+    """DEFAULT insider_alert_only=1 → tidak ada listener.process_ca sama sekali."""
     path, old = _fresh_db()
     try:
         db.init()
+        insider = "0x" + "a" * 40
+        db.add_insider_wallet(insider, win_count=1)
+        token_out = "0x" + "f" * 40
+
+        def _eis(tok_in, tok_out):
+            pad = lambda a: a.lower().replace("0x", "").rjust(64, "0")
+            return (tracker.EXACT_INPUT_SINGLE + "0" * 62 + "20"
+                    + pad(tok_in) + pad(tok_out))
+
+        tx = {"from": insider, "to": tracker.SWAP_ROUTER02,
+              "input": bytes.fromhex(_eis(tracker.WETH, token_out)[2:])}
+
+        calls = []
+
+        async def fake_listener_process_ca(*a, **kw):
+            calls.append((a, kw))
+
+        async def fake_notify(text, **kw):
+            pass
+
+        orig_listener = tracker.listener.process_ca
+        orig_pair = tracker.dx.best_pair
+        orig_notify = tracker._notify_cb
+        tracker.listener.process_ca = fake_listener_process_ca
+        tracker.dx.best_pair = lambda ca: {"priceChange": {"m5": 0.5}}
+        tracker._notify_cb = fake_notify
+        try:
+            sent = asyncio.run(tracker._inspect_block(
+                _FakeW3([tx]), 42))
+        finally:
+            tracker.listener.process_ca = orig_listener
+            tracker.dx.best_pair = orig_pair
+            tracker._notify_cb = orig_notify
+
+        assert sent == 1, sent          # sinyal terdeteksi
+        assert calls == [], calls       # TAPI tidak masuk pipa listener
+        print("PASS inspect_block alert-only default: 0 panggilan listener.process_ca")
+    finally:
+        os.unlink(path)
+        config.DB_PATH = old
+
+
+def test_inspect_block_embeds_insider_addr():
+    """insider_alert_only=0 (perilaku lama): Tx buy insider →
+    process_insider_buy memberi insider_addr=frm ke listener.process_ca."""
+    path, old = _fresh_db()
+    try:
+        db.init()
+        db.set_("insider_alert_only", "0")   # jalur legacy → pipa
         insider = "0x" + "a" * 40
         db.add_insider_wallet(insider, win_count=1)
         token_out = "0x" + "f" * 40
@@ -142,16 +191,22 @@ def test_inspect_block_embeds_insider_addr():
                           "allow_buy": allow_buy if allow_buy is not None
                           else kw.get("allow_buy", True)})
 
+        async def fake_notify(text, **kw):
+            pass
+
         orig_listener = tracker.listener.process_ca
         orig_pair = tracker.dx.best_pair
+        orig_notify = tracker._notify_cb
         tracker.listener.process_ca = fake_listener_process_ca
         tracker.dx.best_pair = lambda ca: {"priceChange": {"m5": 0.5}}
+        tracker._notify_cb = fake_notify
         try:
             sent = asyncio.run(tracker._inspect_block(
                 _FakeW3([tx]), 42))
         finally:
             tracker.listener.process_ca = orig_listener
             tracker.dx.best_pair = orig_pair
+            tracker._notify_cb = orig_notify
 
         assert sent == 1, sent
         assert len(calls) == 1, calls
@@ -173,7 +228,7 @@ def test_inspect_block_embeds_insider_addr():
         pos_rows = [p for p in db.open_positions()]
         assert pos_rows and pos_rows[0]["caller_id"] == insider, pos_rows
         assert pos_rows[0]["caller_name"].startswith("INSIDER:"), pos_rows
-        print("PASS alur: insider address ter-embed di posisi trade")
+        print("PASS alur legacy (insider_alert_only=0): insider address ter-embed di posisi trade")
     finally:
         os.unlink(path)
         config.DB_PATH = old
@@ -279,6 +334,7 @@ if __name__ == "__main__":
     test_record_loss_then_disable()
     test_record_win_resets_loss()
     test_record_normalizes_case_and_unknown()
+    test_inspect_block_alert_only_no_pipeline()
     test_inspect_block_embeds_insider_addr()
     test_prune_stale_insiders()
     test_rotate_recruits_and_reports()

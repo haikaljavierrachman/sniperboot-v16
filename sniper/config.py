@@ -132,6 +132,11 @@ SETTING_DEFAULTS = {
     # ---- 🕵️ Insider Tracker (v16.1): sumber sinyal KETIGA (copy-trade smart money) ----
     "tracker_on":            "0",
     "tracker_last_block":    "0",
+    # ---- 🔔 Insider alert-only (v16.8, Opsi 1) ----
+    # "1" = insider buy CUMA kirim notifikasi Telegram ringkas (tanpa
+    #       masuk pipa listener.process_ca — tidak ada posisi baru).
+    # "0" = perilaku lama: CA diteruskan ke pipa bot (loud fallback).
+    "insider_alert_only":    "1",
     # ---- 🔄 Rotasi wallet insider (v16.3): prune boncos + rekrut dari runner ----
     "tracker_auto_rotate":   "1",
     # ---- 🧪 Dompet kas virtual (paper trading mode latihan) ----
@@ -214,6 +219,7 @@ SETTING_LABELS = {
     "scanner_batch_max":     "🔭 Scanner: maks koin diambil per siklus (2)",
     "scanner_concurrency":   "🔭 Scanner: maks evaluasi paralel serentak (Semaphore)",
     "tracker_auto_rotate":   "🔄 Tracker: rotasi wallet insider otomatis 24h (1/0)",
+    "insider_alert_only":    "🔔 Tracker insider: alert-only tanpa posisi (1) / ikut pakir (0)",
     "entry_mode":            "⚡ Mode entry (mata/fast)",
     "goldilocks_min_age_sec":     "⚡ Goldilocks: min umur pool (dtk)",
     "goldilocks_max_age_sec":     "⚡ Goldilocks: maks umur pool (dtk)",
