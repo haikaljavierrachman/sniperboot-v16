@@ -87,6 +87,7 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
         # bukan harga Dexscreener yang basi 20-40 detik — supaya realized PnL
         # simulasi mencerminkan hasil Nx yang sebenarnya bisa didapat.
         eth_real = None
+        pool_drained_onchain = False
         if _trader:
             try:
                 amt_raw = int(sold * 10**(
@@ -98,14 +99,21 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
                         pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
                     if q_eth and q_eth > 0:
                         eth_real = q_eth
+                    elif pos.get("pool_type") == "v4" and pos.get("pair_address"):
+                        from . import v4 as v4mod
+                        onchain_l = await asyncio.to_thread(
+                            v4mod.liquidity, pos["pair_address"], _trader.w3)
+                        if onchain_l is not None and onchain_l <= 0:
+                            pool_drained_onchain = True
             except Exception:
                 if reason == "rug":
                     # revert/probing gagal total saat rug → asumsi pool mati
                     eth_real = 0.0
         if eth_real is None:
-            if reason == "rug":
-                # 💀 RUG PULL: quote 0/gagal → pool on-chain sudah kosong
-                # (net loss -100%), JANGAN kasih angka palsu/profit phantom.
+            if reason == "rug" or pool_drained_onchain:
+                # 💀 RUG PULL / LP Kosong On-Chain: quote 0 & getLiquidity=0 →
+                # pool on-chain sudah terkuras (net loss -100%), JANGAN kasih
+                # angka palsu dari harga beku Dexscreener.
                 eth_real = 0.0
             else:
                 eth_real = sold * price_native if price_native > 0 else (
@@ -460,10 +468,26 @@ async def _check(pos):
                     if pos["tokens_total"] else 0
                 if cost_eth > 0 and q_eth > 0:
                     onchain_pnl = q_eth / cost_eth - 1.0
+                elif pos.get("pool_type") == "v4" and pos.get("pair_address"):
+                    from . import v4 as v4mod
+                    onchain_l = await asyncio.to_thread(
+                        v4mod.liquidity, pos["pair_address"], _trader.w3)
+                    if onchain_l is not None and onchain_l <= 0:
+                        _cleanup(pos["id"])
+                        await _notify(
+                            f"🚨 **{pos['symbol']}** LP v4 on-chain = 0 "
+                            f"(walau layar Dexscreener masih ${liq:,.0f}) — "
+                            f"RUG PULL ON-CHAIN! EMERGENCY EXIT")
+                        await _notify(await execute_sell(pos["id"], 1.0, "rug"))
+                        return
         except Exception:
             pass  # quoter gagal → fallback ke harga layar di bawah
     if onchain_pnl is not None:
         pnl = onchain_pnl
+        # Harga efektif untuk peak & trailing: turunan dari kuoter on-chain,
+        # sama basis dengan entry_price_usd. Harga layar Dexscreener tertinggal
+        # 20-30s → bandingkan layar vs entry on-chain memicu trail palsu.
+        price = pos["entry_price_usd"] * (1.0 + onchain_pnl)
     else:
         pnl = price / pos["entry_price_usd"] - 1
     tp1_v = pos.get("tp1_x") or db.get("tp1")

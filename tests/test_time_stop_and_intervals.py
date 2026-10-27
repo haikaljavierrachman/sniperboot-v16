@@ -186,7 +186,7 @@ def test_timeout_reason_recorded_in_daily_recap():
 
 def test_defaults_poin234():
     assert config.SETTING_DEFAULTS["poll_seconds"] == "3"
-    assert config.SETTING_DEFAULTS["max_hold_sec"] == "420"
+    assert config.SETTING_DEFAULTS["max_hold_sec"] == "240"
     assert config.SETTING_DEFAULTS["scanner_max_age_min"] == "5"
 
 

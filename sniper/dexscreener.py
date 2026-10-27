@@ -15,11 +15,12 @@ def token_pairs(ca: str):
 
 
 def best_pair(ca: str):
-    """Pair terbaik di Robinhood Chain: liquidity USD tertinggi."""
+    """Pair v4 terbaik di Robinhood Chain: liquidity USD tertinggi (hanya Uniswap v4)."""
     pairs = [
         p for p in token_pairs(ca)
         if config.DEX_CHAIN_MATCH in (p.get("chainId") or "").lower()
         and (p.get("baseToken", {}).get("address", "").lower() == ca.lower())
+        and pool_type(p) == "v4"
     ]
     if not pairs:
         return None

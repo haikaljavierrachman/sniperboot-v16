@@ -36,15 +36,8 @@ _S.headers.update({"User-Agent": "hoodsniper/1.0"})
 
 # --- Robinhood Chain mainnet (chainId 4663) ---
 # Alamat kontrak sumber event & quote asset utama di chain ini.
-# V3/V2 factory + V4 PoolManager diverifikasi terhadap deployment resmi
-# Uniswap untuk Robinhood Chain (docs Uniswap + forum governance Uniswap);
-# factory Pons V2 terhadap dokumentasi ekosistem Pons (PonsVault docs +
-# referensi event TokenLaunched). Semua alamat disimpan huruf-kecil dan
-# WAJIB di-checksum sesaat sebelum get_logs (lihat _fetch_event_candidates).
 V3_FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
 V4_POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
-V2_FACTORY = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f"
-PONS_V2_FACTORY = "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e"
 WETH_ADDR = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 USDG_ADDR = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
 QUOTE_ASSETS = {WETH_ADDR.lower(), USDG_ADDR.lower()}
@@ -53,13 +46,17 @@ QUOTE_ASSETS = {WETH_ADDR.lower(), USDG_ADDR.lower()}
 NATIVE_SENTINEL = "0x0000000000000000000000000000000000000000"
 QUOTE_ASSETS_V4 = QUOTE_ASSETS | {NATIVE_SENTINEL}
 POOL_CREATED_SIG = "PoolCreated(address,address,uint24,int24,address)"
-V2_PAIR_CREATED_SIG = "PairCreated(address,address,address,uint256)"
 V4_INITIALIZE_SIG = "Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)"
-PONS_LAUNCHED_SIG = "TokenLaunched(address,address,address,address,uint256,uint256)"
 MAX_BLOCKS_PER_CYCLE = 2000
 
 # Statistik siklus terakhir (diisi collect_and_rank, dibaca scanner_loop/test)
 _last_stats = {"kandidat": 0, "sudah_dilihat": 0, "lolos": 0}
+
+# Retry kandidat antrean pending (in-process): CA → waktu evaluasi terakhir.
+# Throttle 20 detik supaya koin yang masih muda tidak memanggil RPC/safety
+# tiap siklus 5 detik selama 10 menit penuh.
+_retry_last: dict = {}
+_RETRY_THROTTLE_SEC = 20.0
 
 # Cap keputusan per jam: stempel waktu keputusan dalam proses ini saja.
 # Sengaja in-memory — restart proses = cap mulai dari nol lagi (lihat docs).
@@ -235,14 +232,11 @@ def fetch_factory_candidates(w3) -> list:
         "scanner_last_block", parse_pool_created_log)
 
 
-# Urutan prioritas Duopoli: v4 (venue meme utama chain ini, ~70%),
-# lalu v2 (klasik x*y=k, ~17%).
-# Uniswap v3 (sarang jebakan tick range) dan Pons dinonaktifkan.
+# Hanya Uniswap v4 (venue meme utama chain ini, ~96%+).
+# Uniswap v3 (sarang jebakan tick range), v2, dan Pons dinonaktifkan.
 _EVENT_SOURCES = [
     ("factory-v4", V4_POOL_MANAGER, V4_INITIALIZE_SIG,
      "scanner_last_block_v4", parse_v4_initialize_log),
-    ("factory-v2", V2_FACTORY, V2_PAIR_CREATED_SIG,
-     "scanner_last_block_v2", parse_pool_created_log),
 ]
 
 
@@ -403,7 +397,12 @@ def collect_and_rank() -> list:
     # antrean ini CA langsung dibuang saat best_pair -> None dan hilang
     # selamanya. Tahan di antrean sampai best_pair mengembalikan pair, atau
     # kedaluwarsa (> 600 detik) lalu dibersihkan.
-    pending_cands: list = []
+    #
+    # v16.9: antrean ini juga menampung koin yang SUDAH terindeks tapi masih
+    # gagal pra-filter (liq kecil karena baru lahir, dsb). Dulu CA-nya
+    # dikeluarkan sebelum filter → hilang permanen dan tidak pernah dicek
+    # lagi saat likuiditasnya naik.
+    pending_now: dict = {}
     if db.get("scanner_factory_on", str) == "1":
         new_onchain = fetch_multipool_candidates(_make_w3())
         for ca in new_onchain:
@@ -412,21 +411,30 @@ def collect_and_rank() -> list:
     # bersihkan antrean yang kedaluwarsa (> 600 detik / 10 menit)
     db.prune_pending_pools(max_age_sec=600)
     for p in db.get_pending_pools(max_age_sec=600):
-        if p["ca"] not in pending_cands:
-            pending_cands.append(p["ca"])
-    cands = list(dict.fromkeys(cands_profiles + pending_cands))
+        pending_now[p["ca"]] = p
+    cands = list(dict.fromkeys(cands_profiles + list(pending_now)))
     _last_stats["kandidat"] = len(cands)
     _last_stats["sudah_dilihat"] = 0
+    _last_stats["ditahan"] = 0
     out = []
+    now = time.time()
     for ca in cands:
-        if db.seen_call(ca):
+        seen = db.seen_call(ca)
+        in_pending = ca in pending_now
+        if seen and not in_pending:
             _last_stats["sudah_dilihat"] += 1
-            # sudah tercatat diproses — keluarkan dari antrean pending
-            db.remove_pending_pool(ca)
+            continue
+        if in_pending and now - _retry_last.get(ca, 0.0) < _RETRY_THROTTLE_SEC:
+            # Koin di antrean (termasuk yang sudah pernah masuk listener)
+            # tidak perlu dicek tiap siklus 5 detik: cukup tiap 20 detik.
+            # Hemat kuota Dexscreener + RPC, tanpa mengubah peluang entry
+            # (gate umur minimum 10 detik, jadi jeda 20 detik tetap aman).
             continue
         try:
             pair = dx.best_pair(ca)
+            _retry_last[ca] = now
         except Exception as e:
+            _retry_last[ca] = now
             print(f"[scanner] best_pair gagal {ca}: {e}")
             continue
         if not pair:
@@ -434,12 +442,20 @@ def collect_and_rank() -> list:
             # supaya dicek lagi siklus berikutnya — catat retry-nya.
             db.increment_pending_retry(ca)
             continue
-        # Dexscreener sudah mengindeks — keluarkan dari antrean pending
-        db.remove_pending_pool(ca)
-        ok, _reason = market_ok(pair)
+        ok, reason = market_ok(pair)
         if not ok:
+            # Belum layak TAPI belum tentu mati (koin baru: liq masih naik).
+            # Simpan di antrean sampai kedaluwarsa, jangan buang diam-diam.
+            if not in_pending and dx.pool_type(pair) == "v4":
+                db.add_pending_pool(ca)
+            _last_stats.setdefault("ditahan", 0)
+            _last_stats["ditahan"] += 1
             continue
-        out.append({"ca": ca, "pair": pair, "score": score_pair(pair)})
+        # lolos pra-filter: keluarkan dari antrean HANYA kalau gate akhir
+        # (listener) juga tidak lagi bisa berubah — lihat scanner_loop.
+        _retry_last[ca] = now
+        out.append({"ca": ca, "pair": pair, "score": score_pair(pair),
+                    "retry": seen, "in_pending": in_pending})
     out.sort(key=lambda r: r["score"], reverse=True)
     _last_stats["lolos"] = len(out)
     return out
@@ -485,6 +501,17 @@ def get_scanner_source() -> dict:
     return {"id": 0, "name": "SCANNER", "mcap_max": mcap_max}
 
 
+# Status penolakan yang masih bisa berubah kalau koin dibiarkan matang:
+# umur (<10s), likuiditas kecil yang sedang naik, rasio liq/mcap, dan
+# quoter yang gagal sesaat. Selain ini dianggap final.
+_RETRYABLE_PREFIXES = ("skip_fast:age_", "skip_fast:liq_", "skip_fast:quote_gagal",
+                       "filtered:liq")
+
+
+def _retryable_status(status: str) -> bool:
+    return str(status or "").startswith(_RETRYABLE_PREFIXES)
+
+
 async def scanner_loop():
     """Loop utama scanner (gabungan). Jalan keluar ke pipa:
     listener.process_ca(..., allow_buy=True) — eksekusi diatur mode global
@@ -522,9 +549,16 @@ async def scanner_loop():
             async def _eval(item):
                 async with sem:
                     status = await listener.process_ca(
-                        item["ca"], src_row, None, "SCANNER", allow_buy=True)
+                        item["ca"], src_row, None, "SCANNER", allow_buy=True,
+                        retry=bool(item.get("retry")))
                     if status in ("bought", "dry_run_simulated"):
                         _note_decision()
+                    # Keluarkan dari antrean pending hanya kalau hasilnya
+                    # final. Penolakan "masih terlalu dini" (umur/likuiditas)
+                    # dibiarkan sampai kedaluwarsa supaya ada kesempatan
+                    # dievaluasi lagi saat liq naik.
+                    if item.get("in_pending") and not _retryable_status(status):
+                        db.remove_pending_pool(item["ca"])
                     return item["ca"], status
 
             results = await asyncio.gather(*[_eval(it) for it in batch])
@@ -534,6 +568,7 @@ async def scanner_loop():
                     processed += 1
                 print(f"[scanner] {ca_addr} -> {st}")
             print(f"[scanner] kandidat={_last_stats['kandidat']} "
+                  f"ditahan={_last_stats.get('ditahan', 0)} "
                   f"lolos={len(ranked)} diproses={processed}")
             await asyncio.sleep(interval)
         except asyncio.CancelledError:

@@ -121,13 +121,19 @@ def _fake_best_pair_ca1(ca):
 
 scanner.dx.best_pair = _fake_best_pair_ca1
 
+# simulasikan 20+ detik berlalu (throttle retry antrean pending)
+scanner._retry_last = {k: v - 25.0 for k, v in scanner._retry_last.items()}
+
 r2 = scanner.collect_and_rank()
 check("cycle2: CA1 lolos (pair ditemukan)",
       len(r2) == 1 and r2[0]["ca"] == CA1L, str(r2))
 check("cycle2: score ada", r2 and isinstance(r2[0]["score"], float))
+check("cycle2: item ditandai in_pending", r2 and r2[0].get("in_pending") is True, str(r2))
+check("cycle2: retry=False (belum pernah dievaluasi listener)",
+      r2 and r2[0].get("retry") is False, str(r2))
 pools = {p["ca"]: p for p in db.get_pending_pools()}
-check("cycle2: CA1 dihapus dari pending (sudah idx)",
-      CA1L not in pools, str(sorted(pools)))
+check("cycle2: CA1 MASIH pending (menunggu status final listener)",
+      CA1L in pools, str(sorted(pools)))
 check("cycle2: CA2 masih pending (best_pair masih None)", CA2 in pools)
 check("cycle2: retry CA2 = 2 (sudah 2 siklus None)",
       pools.get(CA2, {}).get("retries") == 2,
@@ -157,35 +163,36 @@ check("prune_pending_pools: baris kedaluwarsa dihapus",
       all(p["ca"] != CA2 for p in left), str(left))
 
 # ======================================================================
-# 5) Siklus 3: dup / seen_call → keluar dari antrean
+# 5) Retry: CA sudah dievaluasi tapi masih di antrean → boleh dicek ulang
 # ======================================================================
-print("\n=== 5. siklus 3: seen_call=True → keluar dari antrean ===")
+print("\n=== 5. retry kandidat pending (seen_call=True, masih di antrean) ===")
 
-scanner.fetch_multipool_candidates = _fake_multipool  # kembali dua CA, tapi
-# CA1 sudah dicatat sebagai call → remove_pending, CA2 (ex-pending) juga seen?
-# --- karena collect_and_rank tidak memanggil record_call sendiri
-# (itu bagian listener.process_ca), kita record manual CA2 sebagai sudah
-# diproses untuk mensimulasikan dup.
-db.record_call(CA2, 1)  # source sintetis id=1
+db.add_pending_pool(CA1L)
+db.record_call(CA1L, 1)  # simulasi listener sudah pernah mengevaluasi
+scanner._retry_last.clear()
+scanner.dx.best_pair = _fake_best_pair_ca1
 
-r3 = scanner.collect_and_rank()
-# Yang diuji di siklus 3 murni ANTREAN (bukan dedup profil — profil Dexscreener
-# memang bisa memunculkan CA yang worthy diproses ulang via pipeline listener):
-#  - semua CA yang pernah di antrean sudah dibersihkan (expired / seen / removed)
-#  - kedua CA memang dup (r3 boleh mengandung mereka, tapi hanya via jalur
-#    profile — sama seperti sebelumnya, dulu keduanya lolos jalur profile di
-#    collect_and_rank)
-check("cycle3: antrean kosong (semua CA dibersihkan)",
-      db.get_pending_pools(max_age_sec=10**9) == [],
-      str(db.get_pending_pools(max_age_sec=10**9)))
-check("cycle3: profil dedup → hanya 1 kandidat profil tersisa",
-      scanner._last_stats["kandidat"] == 1,
-      str(scanner._last_stats))
-check("cycle3: 1 kandidat profil lolos walau dup via seen-pipeline (pipeline listener)",
-      scanner._last_stats["lolos"] == 1,
-      str(scanner._last_stats))
-pools = db.get_pending_pools(600)
-check("cycle3: antrean kosong (semua CA ter-unqueue)", pools == [], str(pools))
+r5 = scanner.collect_and_rank()
+check("retry: CA muncul lagi walau sudah seen_call",
+      [x["ca"] for x in r5] == [CA1L], str(r5))
+check("retry: item.retry=True", r5 and r5[0].get("retry") is True, str(r5))
+check("retry: throttle 20s → siklus berikutnya dilewati",
+      scanner.collect_and_rank() == [], "throttle tidak bekerja")
+
+db.remove_pending_pool(CA1L)
+r6 = scanner.collect_and_rank()
+check("final: keluar antrean → seen_call memblokir permanen", r6 == [], str(r6))
+
+# status gate yang masih bisa berubah = retryable
+check("_retryable_status: age_ → True", scanner._retryable_status("skip_fast:age_4s") is True)
+check("_retryable_status: liq_rendah → True",
+      scanner._retryable_status("skip_fast:liq_rendah") is True)
+check("_retryable_status: filtered:liq → True",
+      scanner._retryable_status("filtered:liq") is True)
+check("_retryable_status: filtered:mcap → False",
+      scanner._retryable_status("filtered:mcap") is False)
+check("_retryable_status: bought → False",
+      scanner._retryable_status("bought") is False)
 
 # ======================================================================
 # 6) Restore mock & DB — jebakan lain tidak dikotamin

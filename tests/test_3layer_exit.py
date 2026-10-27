@@ -370,7 +370,7 @@ def test_moonbag_exempt_from_normal_time_stop():
 # ---------- konfigurasi ----------
 
 def test_config_defaults_and_labels():
-    assert config.SETTING_DEFAULTS["tp2_sell_pct"] == "0.50"
+    assert config.SETTING_DEFAULTS["tp2_sell_pct"] == "1.0"
     assert config.SETTING_DEFAULTS["moonbag_trail_pct"] == "0.20"
     assert "tp2_sell_pct" in config.SETTING_LABELS
     assert "moonbag_trail_pct" in config.SETTING_LABELS

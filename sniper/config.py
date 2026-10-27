@@ -16,7 +16,6 @@ PRIVATE_KEY   = os.getenv("PRIVATE_KEY", "")
 
 # ---- Uniswap di Robinhood Chain (Chain 4663) ----
 SWAP_ROUTER02 = os.getenv("SWAP_ROUTER02", "0xcaf681a66d020601342297493863e78c959e5cb2")
-V2_ROUTER     = os.getenv("V2_ROUTER", "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba")
 
 # ---- Telegram userbot (Telethon, QR login) ----
 TG_API_ID     = _i("TG_API_ID", 0)
@@ -63,12 +62,12 @@ SETTING_DEFAULTS = {
     # (300-500ms / 5-8 blok pump +1..3%) + price impact + fee pool DEX.
     # Koin wajib naik +2.5% dulu untuk mencapai titik impas (breakeven).
     "paper_entry_spread_pct": "0.025",
-    "tp1":            "0.50",
-    "tp2":            "1.00",
+    "tp1":            "0.20",
+    "tp2":            "0.45",
     "sl":             "-0.30",
-    "tp1_sell_pct":   "0.50",
-    # --- Exit 3 lapis: TP2 jual 50% sisa, sisa jadi moonbag trailing 20% ---
-    "tp2_sell_pct":   "0.50",
+    "tp1_sell_pct":   "0.60",
+    # --- TP2 jual 100% sisa (rug LP v4 terukur 302-425s, moonbag hangus). Turunkan <1.0 untuk aktifkan moonbag ---
+    "tp2_sell_pct":   "1.0",
     "moonbag_trail_pct": "0.20",
     "tp_verify":      "1",
     "rug_liq_drop":   "0.40",
@@ -81,7 +80,7 @@ SETTING_DEFAULTS = {
     "sell_slippage":  "0.35",
     "min_liq_usd":    "500",
     "poll_seconds":   "3",
-    "max_hold_sec":   "420",
+    "max_hold_sec":   "240",
     # ---- 🌙 Moonbag dual-guard (v16.7) ----
     # inactivity: 7 menit tanpa transaksi (Dexscreener txns.m5 = 0) ATAU
     # quote jual on-chain = 0 → EXIT INACTIVE.
@@ -137,6 +136,10 @@ SETTING_DEFAULTS = {
     #       masuk pipa listener.process_ca — tidak ada posisi baru).
     # "0" = perilaku lama: CA diteruskan ke pipa bot (loud fallback).
     "insider_alert_only":    "1",
+    # ---- 🧹 Dedup alert insider (wallet sama + CA sama dalam satu jendela waktu) ----
+    # Detik jendela dedup: beli berulang wallet yang sama di token yang sama
+    # dalam jendela ini hanya kirim notif mini "(+N beli lagi…)". "0" = mati.
+    "insider_alert_dedup_window_sec": "600",
     # ---- 🔄 Rotasi wallet insider (v16.3): prune boncos + rekrut dari runner ----
     "tracker_auto_rotate":   "1",
     # ---- 🧪 Dompet kas virtual (paper trading mode latihan) ----
@@ -208,7 +211,7 @@ SETTING_LABELS = {
     "scanner_on":            "🔭 Scanner: analisa semua coin (1=ON) — sumber sinyal kedua",
     "scanner_interval_sec":  "🔭 Scanner: interval siklus (dtk)",
     "scanner_mcap_max":      "🔭 Scanner: maks mcap kandidat (USD)",
-    "scanner_ignore_v3":     "🔭 Scanner: abaikan pool v3 (1=ON, duopoli v4+v2)",
+    "scanner_ignore_v3":     "🔭 Scanner: hanya pool v4 (1=ON, abaikan v2/v3)",
     "scanner_min_liq":       "🔭 Scanner: min likuiditas (USD)",
     "scanner_min_vol_h1":    "🔭 Scanner: min volume 1 jam (USD)",
     "scanner_min_txns_h1":   "🔭 Scanner: min transaksi 1 jam",
@@ -220,6 +223,7 @@ SETTING_LABELS = {
     "scanner_concurrency":   "🔭 Scanner: maks evaluasi paralel serentak (Semaphore)",
     "tracker_auto_rotate":   "🔄 Tracker: rotasi wallet insider otomatis 24h (1/0)",
     "insider_alert_only":    "🔔 Tracker insider: alert-only tanpa posisi (1) / ikut pakir (0)",
+    "insider_alert_dedup_window_sec": "🧹 Dedup alert insider: jendela waktu (detik, 0=mati)",
     "entry_mode":            "⚡ Mode entry (mata/fast)",
     "goldilocks_min_age_sec":     "⚡ Goldilocks: min umur pool (dtk)",
     "goldilocks_max_age_sec":     "⚡ Goldilocks: maks umur pool (dtk)",

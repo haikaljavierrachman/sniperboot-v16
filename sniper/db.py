@@ -183,6 +183,16 @@ def seen_call(ca):
         return c.execute("SELECT 1 FROM calls WHERE ca=?", (ca.lower(),)).fetchone() is not None
 
 
+def touch_call(ca):
+    """Segarkan stempel waktu 'pernah dilihat' tanpa menambah baris baru.
+
+    Dipakai jalur retry antrean pending: CA yang gagal gate boleh dievaluasi
+    ulang, tapi dedup jangka panjang tetap berlaku begitu keluar antrean.
+    """
+    with _lock, _conn() as c:
+        c.execute("UPDATE calls SET ts=? WHERE ca=?", (int(time.time()), ca.lower()))
+
+
 def record_call(ca, source_id, sender_id=None, sender_name=None):
     with _lock, _conn() as c:
         c.execute("INSERT OR IGNORE INTO calls(ca,source_id,sender_id,sender_name,ts) VALUES(?,?,?,?,?)",
@@ -643,5 +653,49 @@ def list_insiders(only_enabled=False):
             q += " WHERE enabled=1"
         q += " ORDER BY win_count DESC, added_at DESC"
         return [dict(r) for r in c.execute(q)]
+
+
+def _init_insider_buys(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS insider_buys(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ca TEXT, wallet TEXT, symbol TEXT DEFAULT '?',
+        mcap REAL DEFAULT 0, liq REAL DEFAULT 0,
+        pair_address TEXT DEFAULT '', ts INTEGER)""")
+
+
+def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
+                       pair_address="", ts=None):
+    now = int(ts if ts is not None else time.time())
+    with _lock, _conn() as c:
+        _init_insider_buys(c)
+        c.execute("""INSERT INTO insider_buys(ca,wallet,symbol,mcap,liq,pair_address,ts)
+                     VALUES(?,?,?,?,?,?,?)""",
+                  ((ca or "").lower(), (wallet or "").lower(),
+                   symbol or "?", float(mcap or 0), float(liq or 0),
+                   pair_address or "", now))
+        c.execute("DELETE FROM insider_buys WHERE ts < ?", (now - 86400,))
+
+
+def top_insider_buys(window_sec=3600, limit=10, now=None):
+    now_i = int(now if now is not None else time.time())
+    cutoff = now_i - max(60, int(window_sec or 3600))
+    with _lock, _conn() as c:
+        _init_insider_buys(c)
+        rows = c.execute("""
+            SELECT ca,
+                   MAX(symbol) AS symbol,
+                   COUNT(*) AS buy_count,
+                   COUNT(DISTINCT wallet) AS wallet_count,
+                   MAX(mcap) AS mcap,
+                   MAX(liq) AS liq,
+                   MAX(pair_address) AS pair_address,
+                   MAX(ts) AS last_ts
+            FROM insider_buys
+            WHERE ts >= ?
+            GROUP BY ca
+            ORDER BY buy_count DESC, wallet_count DESC, last_ts DESC
+            LIMIT ?""", (cutoff, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
 
 

@@ -151,40 +151,11 @@ finally:
     v4mod.pool_key = saved_pk
     v4mod.quote_buy = orig_quote_buy
 
-# ---- e) v2 router ----
-
-
-class FakeRouter2:
-    class functions:
-        @staticmethod
-        def getAmountsOut(wei, path):
-            raise RuntimeError("V2 swap: InsufficientOutputAmount")
-
-
+# ---- e) v2 dinonaktifkan (mode v4-only) ----
 ft2 = FakeTrader()
-ft2.router2 = FakeRouter2()
 ok, out, err = ft2.quote_buy_tokens(CA, "v2", 0, 10**17, min_out=1)
-check("v2 router revert → (False, 0, v2_quoter_error:...)",
-      not ok and out == 0 and err.startswith("v2_quoter_error:"), err)
-
-
-class FakeRouter2OK:
-    class functions:
-        @staticmethod
-        def getAmountsOut(wei, path):
-            class F:
-                def call(self):
-                    return [wei, 3 * 10**18]
-            return F()
-
-
-ft2.router2 = FakeRouter2OK()
-ok, out, err = ft2.quote_buy_tokens(CA, "v2", 0, 10**17, min_out=1)
-check("v2 getAmountsOut sukses → (True, out, '')",
-      ok and out == 3 * 10**18 and err == "", f"{ok},{out},{err}")
-ok, out, err = ft2.quote_buy_tokens(CA, "v2", 0, 10**17, min_out=9 * 10**18)
-check("v2 min_out > out → slippage_exceeded_onchain",
-      not ok and err == "slippage_exceeded_onchain", f"{ok},{err}")
+check("v2 pool dinonaktifkan → (False, 0, 'v2_pool_disabled')",
+      not ok and out == 0 and err == "v2_pool_disabled", err)
 
 # ---- f) v3 ----
 

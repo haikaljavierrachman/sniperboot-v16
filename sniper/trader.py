@@ -37,30 +37,6 @@ ROUTER02_ABI = [
      "outputs": [{"name": "amountOut", "type": "uint256"}]},
 ]
 
-V2_ROUTER_ABI = [
-    {"name": "WETH", "type": "function", "stateMutability": "view",
-     "inputs": [], "outputs": [{"name": "", "type": "address"}]},
-    {"name": "swapExactETHForTokensSupportingFeeOnTransferTokens", "type": "function",
-     "stateMutability": "payable",
-     "inputs": [{"name": "amountOutMin", "type": "uint256"},
-                {"name": "path", "type": "address[]"},
-                {"name": "to", "type": "address"},
-                {"name": "deadline", "type": "uint256"}],
-     "outputs": []},
-    {"name": "getAmountsOut", "type": "function", "stateMutability": "view",
-     "inputs": [{"name": "amountIn", "type": "uint256"},
-                {"name": "path", "type": "address[]"}],
-     "outputs": [{"name": "amounts", "type": "uint256[]"}]},
-    {"name": "swapExactTokensForETHSupportingFeeOnTransferTokens", "type": "function",
-     "stateMutability": "nonpayable",
-     "inputs": [{"name": "amountIn", "type": "uint256"},
-                {"name": "amountOutMin", "type": "uint256"},
-                {"name": "path", "type": "address[]"},
-                {"name": "to", "type": "address"},
-                {"name": "deadline", "type": "uint256"}],
-     "outputs": []},
-]
-
 POOL_ABI = [
     {"name": "fee", "type": "function", "stateMutability": "view",
      "inputs": [], "outputs": [{"name": "", "type": "uint24"}]},
@@ -103,18 +79,10 @@ class Trader:
         self.router3 = self.w3.eth.contract(
             Web3.to_checksum_address(config.SWAP_ROUTER02), abi=ROUTER02_ABI)
         self.router2 = None
-        if (config.V2_ROUTER or "").strip():
-            self.router2 = self.w3.eth.contract(
-                Web3.to_checksum_address(config.V2_ROUTER), abi=V2_ROUTER_ABI)
-        # validasi: kedua router HARUS punya kontrak di chain ini — kalau tidak,
-        # error "Could not transact with/call contract function" baru muncul pas
-        # buy (duit mau keluar). Mending gagal jelas di startup.
         cid = self.w3.eth.chain_id
         if cid != config.CHAIN_ID:
             raise SystemExit(f"[trader] RPC nyambung ke chain {cid}, bukan {config.CHAIN_ID} — cek RPC_URL")
         _routers = [("SWAP_ROUTER02", self.router3.address)]
-        if self.router2 is not None:
-            _routers.append(("V2_ROUTER", self.router2.address))
         for name, addr in _routers:
             if len(self.w3.eth.get_code(addr)) <= 2:
                 raise SystemExit(
@@ -174,9 +142,8 @@ class Trader:
         from . import dexscreener as dx
         ca = Web3.to_checksum_address(ca)
         ptype = dx.pool_type(pair)
-        if ptype == "v2" and self.router2 is None:
-            raise RuntimeError("pool v2 terdeteksi tapi V2_ROUTER belum "
-                               "dikonfigurasi - token dilewati (mode v3-only)")
+        if ptype == "v2":
+            raise RuntimeError("pool v2 dinonaktifkan (mode v4-only)")
         eth_price = dx.eth_usd(pair)
         if eth_price <= 0:
             raise RuntimeError("gagal derive harga ETH dari pair")
@@ -232,12 +199,7 @@ class Trader:
         before = token.functions.balanceOf(self.addr).call()
         eth_before = self.w3.eth.get_balance(self.addr)
 
-        if ptype == "v2":
-            fn = self.router2.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(
-                min_out, [self.weth_addr, ca], self.addr, int(time.time()) + 120)
-            rcpt = self._send(fn, value=wei_in)
-            router_used, fee = self.router2.address, 0
-        elif ptype == "v4":
+        if ptype == "v4":
             # ---------- Uniswap v4: pairAddress = PoolId, bukan kontrak ----------
             from . import v4 as v4mod
             pool_id = pair["pairAddress"]
@@ -294,21 +256,11 @@ class Trader:
 
     def _can_sell(self, ca, ptype, fee, amount_raw):
         try:
-            if ptype == "v2":
-                fn = self.router2.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-                    amount_raw, 0, [Web3.to_checksum_address(ca), self.weth_addr],
-                    self.addr, int(time.time()) + 120)
-            elif ptype == "v4":
-                from . import v4 as v4mod
-                # _can_sell dipanggil dari buy() dengan ptype 'v4', tapi pair
-                # address (PoolId) tidak tersedia di signature ini; sinyal yang
-                # cukup: quoter balik > 0 via momen ini → tandai ok dulu, karena
-                # v4.liquidity(0) sudah jadi guard keras di jalur buy.
+            if ptype == "v4":
                 return True
-            else:
-                fn = self.router3.functions.exactInputSingle((
-                    Web3.to_checksum_address(ca), self.weth_addr, fee,
-                    self.addr, amount_raw, 0, 0))
+            fn = self.router3.functions.exactInputSingle((
+                Web3.to_checksum_address(ca), self.weth_addr, fee,
+                self.addr, amount_raw, 0, 0))
             fn.call({"from": self.addr})
             return True
         except Exception:
@@ -361,20 +313,7 @@ class Trader:
                 if (min_out and res.amount_out < int(min_out)) \
                 else (True, res.amount_out, "")
         elif ptype == "v2":
-            if self.router2 is None:
-                return False, 0, "v2_quoter_error:V2_ROUTER belum dikonfigurasi"
-            try:
-                amounts = self.router2.functions.getAmountsOut(
-                    int(wei_in), [self.weth_addr, ca]).call()
-                out = int(amounts[-1])
-            except Exception as e:
-                return False, 0, f"v2_quoter_error:{e}"
-            if out <= 0:
-                return False, out, "v2_quoter_zero_output"
-            # v2: InsufficientOutputAmount dari router = guard slippage
-            # on-chain; di sini cukup cek min_out terhadap quote.
-            return (False, out, "slippage_exceeded_onchain") \
-                if (min_out and out < int(min_out)) else (True, out, "")
+            return False, 0, "v2_pool_disabled"
         else:  # v3
             try:
                 out = self.router3.functions.exactInputSingle((
@@ -398,32 +337,22 @@ class Trader:
         v4: V4Quoter.quoteExactInputSingle (arah sell: token→ETH).
         Ini quote nembus depth pool, bukan harga spot layar."""
         ca = Web3.to_checksum_address(ca)
-        if ptype == "v2" and self.router2 is None:
-            raise RuntimeError("quote v2 tanpa V2_ROUTER (mode v3-only)")
+        if ptype == "v2":
+            raise RuntimeError("quote v2 dinonaktifkan (mode v4-only)")
         if ptype == "v4":
             from . import v4 as v4mod
             if not pool_id:
                 return 0.0
+            liq = v4mod.liquidity(pool_id, self.w3)
+            if liq is not None and liq <= 0:
+                return 0.0
             pk = v4mod.pool_key(pool_id, self.w3)
             if pk is None:
                 return 0.0
-            # arah sell = token → ETH: pakai quoter dgn poolKey sama tapi
-            # zeroForOne=False. quote_buy hardcodes True, jadi encode manual.
-            from eth_abi import encode as ae
-            params = (
-                (pk.currency0, pk.currency1, pk.fee, pk.tickSpacing, pk.hooks),
-                False, int(amount_raw), b"")
-            try:
-                q = self.w3.eth.contract(
-                    Web3.to_checksum_address(v4mod.V4_QUOTER), abi=v4mod.V4_QUOTER_ABI)
-                out = q.functions.quoteExactInputSingle(params).call()
-                return int(out[0]) / 1e18
-            except Exception:
-                return 0.0
-        if ptype == "v2":
-            amounts = self.router2.functions.getAmountsOut(
-                amount_raw, [ca, self.weth_addr]).call()
-            return amounts[-1] / 1e18
+            res = v4mod.quote_sell(pk, int(amount_raw), self.w3)
+            if res.ok and res.amount_out > 0:
+                return int(res.amount_out) / 1e18
+            return 0.0
         out = self.router3.functions.exactInputSingle((
             ca, self.weth_addr, fee, self.addr, amount_raw, 0, 0)).call({"from": self.addr})
         return out / 1e18
@@ -478,8 +407,8 @@ class Trader:
                 swap_tx = _txh(rcpt)
             return rcpt
 
-        if pos["pool_type"] == "v2" and self.router2 is None:
-            raise RuntimeError("sell posisi v2 tanpa V2_ROUTER (mode v3-only)")
+        if pos["pool_type"] == "v2":
+            raise RuntimeError("sell posisi v2 dinonaktifkan (mode v4-only)")
         if pos["pool_type"] == "v4":
             # ---------- v4 sell: jalur UniversalRouter ----------
             # BUTUH PERMIT2 dua lapis (lihat sniper.v4.ensure_v4_sell_approval):
@@ -503,15 +432,6 @@ class Trader:
                 send(mk_v4(min_out), is_swap=True)
             except Exception:
                 send(mk_v4(1), is_swap=True)  # panic exit
-        elif pos["pool_type"] == "v2":
-            self._ensure_approval(ca, self.router2.address)
-            def mk(mo):
-                return self.router2.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-                    amount_raw, mo, [ca, self.weth_addr], self.addr, int(time.time()) + 120)
-            try:
-                send(mk(min_out), is_swap=True)
-            except Exception:
-                send(mk(1), is_swap=True)  # panic exit
         else:
             self._ensure_approval(ca, self.router3.address)
             def mk(mo):

@@ -149,7 +149,9 @@ def _agent_card(pair, ca, src_name, decision, mode, min_conv=None) -> str:
     teks LLM, jadi selalu hadir dan selalu akurat.
     """
     sym = (pair.get("baseToken") or {}).get("symbol", "?")
-    mcap = dx.mcap_of(pair)
+    mcap_screen = dx.mcap_of(pair)
+    mcap_oc = ((decision or {}).get("_gate_metrics") or {}).get("mcap_onchain")
+    mcap = float(mcap_oc) if mcap_oc else mcap_screen
     sym = pair.get("baseToken", {}).get("symbol", "?")
 
     def _fmt_liq(v):
@@ -467,11 +469,14 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
         return False, "mcap_onchain_pucuk", metr
     metr.update({"tokens_total": tokens_total,
                  "entry_price_usd": entry_price_usd,
-                 "mcap_onchain": mcap_onchain})
+                 "mcap": mcap_onchain,
+                 "mcap_onchain": mcap_onchain,
+                 "ratio": (liq / mcap_onchain) if (liq and mcap_onchain > 0) else metr.get("ratio")})
     return True, "", metr
 
 
-async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
+async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
+                     retry=False):
     """Proses SATU kandidat CA lewat pipa: filter → sosmed → safety → Mata → buy.
 
     Dipakai listener (dari pesan grup) maupun scanner (sniper/scanner.py).
@@ -488,9 +493,18 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
     """
     if db.paused():
         return "paused"
-    if db.seen_call(ca):
-        return "dup"
-    db.record_call(ca, src["id"], caller_id, caller_name)
+    ca_lc = str(ca).lower()
+    if retry:
+        # Jalur retry antrean pending (scanner): CA sudah pernah dievaluasi
+        # tapi masih muda / likuiditasnya belum naik. Boleh dicek ulang,
+        # TAPI jangan pernah buka posisi kedua di CA yang sama.
+        if any(str(p.get("ca", "")).lower() == ca_lc for p in db.open_positions()):
+            return "dup_position"
+        db.touch_call(ca)
+    else:
+        if db.seen_call(ca):
+            return "dup"
+        db.record_call(ca, src["id"], caller_id, caller_name)
 
     pair = await asyncio.to_thread(dx.best_pair, ca)
     if not pair:
@@ -502,9 +516,9 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
     sym = pair.get("baseToken", {}).get("symbol", "?")
     ptype_dx = dx.pool_type(pair)
 
-    # ---------- Duopoli Guard: Tolak pool v3 (sarang tick-trap 100% rug) ----------
-    if db.get("scanner_ignore_v3", str) == "1" and src.get("name") == "SCANNER" and ptype_dx == "v3":
-        return "filtered:v3_pool_disabled"
+    # ---------- v4-Only Guard: Tolak pool selain v4 (v2/v3 disabled) ----------
+    if db.get("scanner_ignore_v3", str) == "1" and src.get("name") == "SCANNER" and ptype_dx != "v4":
+        return f"filtered:{ptype_dx}_pool_disabled"
 
     # ---------- v4: likuiditas Dexscreener sering null ----------------
     # Jangan sampai filter min-liq salah menolak (atau rug monitor buta).
@@ -528,10 +542,20 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
 
     if mcap <= 0 or mcap > src["mcap_max"]:
         print(f"[skip] {sym} mcap ${mcap:,.0f} > limit ${src['mcap_max']:,.0f} ({src['name']})")
+        await _notify(
+            f"⚡ **SKIP {sym}** _via {src['name']}_\n`{ca}`\n"
+            f"reason: mcap_terlalu_besar\n"
+            f"📊 mcap ${mcap:,.0f} (limit ${src['mcap_max']:,.0f})"
+            + (f" · liq ${liq:,.0f}" if liq else ""))
         return "filtered:mcap"
     if liq is not None and liq < db.get("min_liq_usd"):
         # Dexscreener tahu likuiditasnya dan rendah → tolak
         print(f"[skip] {sym} liq ${liq:,.0f} < min")
+        await _notify(
+            f"⚡ **SKIP {sym}** _via {src['name']}_\n`{ca}`\n"
+            f"reason: liq_rendah\n"
+            f"📊 liq ${liq:,.0f} (min ${db.get('min_liq_usd'):,.0f})"
+            + (f" · mcap ${mcap:,.0f}" if mcap > 0 else ""))
         return "filtered:liq"
     if liq is None:
         print(f"[filter] {sym} liq Dexscreener null — dipakai on-chain (v4) / diteruskan")
@@ -574,7 +598,8 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
             return f"skip_fast:{tag_f}"
         liq_f = metr_f.get("liq") or 0.0
         mcap_f = metr_f.get("mcap") or 0.0
-        ratio_f = metr_f.get("ratio") or 0.0
+        mcap_oc_f = metr_f.get("mcap_onchain") or mcap_f
+        ratio_f = (liq_f / mcap_oc_f) if mcap_oc_f > 0 else (metr_f.get("ratio") or 0.0)
         age_f = metr_f.get("pool_age") or 0.0
         tp1_f = float(db.get("goldilocks_tp1", float) or 0.35)
         tp2_f = float(db.get("goldilocks_tp2", float) or 0.80)
@@ -590,7 +615,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
             "tp1": tp1_f, "tp2": tp2_f, "sl": -0.30,
             "risks": "",
             "reason": (f"⚡ FAST-PATH Goldilocks: umur {age_f:.0f}s, "
-                       f"liq ${liq_f:,.0f}, mcap ${mcap_f:,.0f}, "
+                       f"liq ${liq_f:,.0f}, mcap ${mcap_oc_f:,.0f}, "
                        f"ratio {ratio_f * 100:.1f}%, quote OK"),
             # plumbing metrik gate → notif BUY (2 baris di bawah)
             "_gate_metrics": dict(metr_f or {}),
@@ -600,7 +625,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
                         reason=decision["reason"], risks="goldilocks_defensive")
         await _notify(
             f"⚡ **FAST-PATH BUY {sym}** _via {src['name']}_\n"
-            f"`{ca}`\n📊 mcap ${mcap_f:,.0f} | liq ${liq_f:,.0f} "
+            f"`{ca}`\n📊 mcap ${mcap_oc_f:,.0f} | liq ${liq_f:,.0f} "
             f"({ratio_f * 100:.1f}%) | umur pool {age_f:.0f}s\n"
             f"🎯 TP1 +{tp1_f * 100:.0f}% · TP2 +{tp2_f * 100:.0f}% · "
             f"SL -30% (conviction 90)\n_{decision['reason']}_")
@@ -825,7 +850,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
         await _notify(
             f"🧪 **[SIMULASI] BUY {sym}**  _via {src['name']}_\n"
             f"`{pos['ca']}`\n"
-            f"💰 mcap ${mcap:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
+            f"💰 mcap ${mcap_onchain:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
             f"paper masuk **${pos['usd_spent']:.2f}** ({pos['eth_spent']:.6f} ETH) → "
             f"{pos['tokens_total']:,.0f} {sym}\n"
             f"entry ${pos['entry_price_usd']:.10f} (on-chain quote){sell_line}"
@@ -931,10 +956,11 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True):
             + f"\n👤 dev {_dash(_dev)} (maks {max_dev * 100:.0f}%)"
             + f" · top10 {_dash(_top)} (maks {max_top * 100:.0f}%)"
             + f" · mcap on-chain {_dash(_oc)} (maks ${max_oc:,.0f})")
+    _mcap_live = gate.get("mcap_onchain") or mcap
     await _notify(
         f"🟢 **BUY {pos['symbol']}**  _via {src['name']}_\n"
         f"`{pos['ca']}`{gate_lines}\n"
-        f"💰 mcap ${mcap:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
+        f"💰 mcap ${_mcap_live:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
         f"🌐 sosmed: {soc_line}\n"
         f"masuk **${pos['usd_spent']:.2f}** ({pos['eth_spent']:.6f} ETH) → {pos['tokens_total']:,.0f} {pos['symbol']}\n"
         f"entry ${pos['entry_price_usd']:.10f}{caller_line}{hp}{agent_line}",

@@ -36,6 +36,8 @@ import json
 import re
 import time
 
+import threading
+
 from . import config, db, listener
 from . import dexscreener as dx
 
@@ -230,17 +232,33 @@ def _fmt_usd_compact(v) -> str:
     return f"${v:,.0f}"
 
 
-def _insider_alert_text(pair, ca, wallet_label: str) -> str:
-    """Teks notif alert insider — maks 6 baris, tanpa emoji jualan."""
+def _insider_alert_text(pair, ca, wallet_label: str,
+                        extra_buys: int = 0, dedup_window_sec: int = 0) -> str:
+    """Teks notif alert insider — maks 6 baris, tanpa emoji jualan.
+
+    extra_buys > 0 → baris wallet diberi penghitung dedup:
+    "(+N beli lagi dalam 10m)" — notif mini gabungan, bukan alert penuh.
+    """
     sym = (pair.get("baseToken") or {}).get("symbol", "?") if pair else "?"
     mcap = dx.mcap_of(pair) if pair else 0
     liq = dx.liq_usd_or_none(pair) if pair else None
     pair_addr = (pair or {}).get("pairAddress", "")
     chain = (pair or {}).get("chainId") or "robinhood"
     chart = f"https://dexscreener.com/{chain}/{pair_addr}" if pair_addr else ""
+    wallet_line = f"wallet `{wallet_label}`"
+    if extra_buys > 0:
+        window_txt = "?"
+        if dedup_window_sec:
+            if dedup_window_sec % 3600 == 0:
+                window_txt = f"{dedup_window_sec // 3600}h"
+            elif dedup_window_sec % 60 == 0:
+                window_txt = f"{dedup_window_sec // 60}m"
+            else:
+                window_txt = f"{dedup_window_sec}s"
+        wallet_line = f"wallet `{wallet_label}` (+{extra_buys} beli lagi dalam {window_txt})"
     lines = [
         "🕵️ **INSIDER BUY — {}**".format(sym),
-        f"wallet `{wallet_label}`",
+        wallet_line,
         f"`{ca}`",
         f"📊 mcap {_fmt_usd_compact(mcap)} · liq {_fmt_usd_compact(liq) if liq is not None else 'n/a'}",
     ]
@@ -261,6 +279,104 @@ def _deliver_alert(text: str):
         asyncio.create_task(cb(text))
     except Exception as e:
         print(f"[insider] notify fail: {e}")
+
+
+_INSIDER_RETRY_DELAY = 30.0  # detik — retry best_pair sebelum alert
+
+
+# ==================== DEDUP ALERT (wallet, CA) ====================
+# State process-level: (wallet_lower, ca_lower) -> (last_alert_ts, extra_count).
+# Dedup dihitung hanya untuk alert yang BENAR-BENAR dikirim ke Telegram
+# (bukan yang dibiyangkan best_pair None).(dict plain aman: tracker jalan
+# satu loop asyncio; lock hanya untuk task background/retry.)
+_alert_dedup: dict = {}
+_alert_dedup_lock = threading.Lock()
+
+
+def _dedup_window_sec() -> int:
+    """Jendela dedup (detik) dari setting db. 0/negatif/berisik → 0 (mati)."""
+    try:
+        v = int(db.get("insider_alert_dedup_window_sec", str) or "600")
+    except Exception:
+        v = 600
+    return v if v > 0 else 0
+
+
+def _dedup_check_send(wallet: str, ca: str, pair, now=None):
+    """Dedup per-CA koin (1 koin = maks 1 notif chat per jendela) + catat ke DB
+    insider_buys agar frekuensi beli tiap koin bisa dipantau lewat tombol Log Beli.
+    """
+    try:
+        win = _dedup_window_sec()
+        ts = (now if now is not None else time.time())
+        try:
+            sym = ((pair or {}).get("baseToken") or {}).get("symbol") or "?"
+            db.record_insider_buy(
+                ca, wallet, symbol=sym,
+                mcap=dx.mcap_of(pair) if pair else 0,
+                liq=dx.liq_usd_or_none(pair) or 0 if pair else 0,
+                pair_address=(pair or {}).get("pairAddress") or "",
+                ts=int(ts))
+        except Exception:
+            pass
+        key = (ca or "").lower()
+        extra = 0
+        with _alert_dedup_lock:
+            state = _alert_dedup.get(key)
+            if win and state and ts - state[0] < win:
+                _alert_dedup[key] = (state[0], state[1] + 1)
+                return None
+            if state:
+                extra = state[1]
+            if len(_alert_dedup) > 500:  # ponytail: prune murah, tanpa thread
+                for k in [k for k, v in _alert_dedup.items()
+                          if ts - v[0] >= max(win, 1)]:
+                    del _alert_dedup[k]
+            _alert_dedup[key] = (ts, 0)
+        labels = _insider_labels({wallet.lower()} if wallet else set())
+        return _insider_alert_text(
+            pair, ca, _short_wallet(wallet, labels),
+            extra_buys=extra if win else 0, dedup_window_sec=win)
+    except Exception as e:
+        print(f"[insider] dedup check fail: {e}")
+        labels = _insider_labels({(wallet or "").lower()} if wallet else set())
+        return _insider_alert_text(pair, ca, _short_wallet(wallet, labels))
+
+
+async def _alert_after_retry(token_ca: str, insider_addr: str,
+                             delay: float = 0):
+    """Alert-only: ulangi dx.best_pair 1x setelah `delay` detik.
+
+    Dijalankan Di TASK BACKGROUND — tracker loop tidak pernah memblok.
+    Kalau pair ketemu setelah retry → alert normal dikirim ke Telegram.
+    Kalau masih None → diem saja (log forensik). Tidak boleh raise.
+    """
+    try:
+        await asyncio.sleep(_INSIDER_RETRY_DELAY if not delay else delay)
+        try:
+            pair = await asyncio.to_thread(dx.best_pair, token_ca)
+        except Exception:
+            pair = None
+        if not pair:
+            print(f"[insider] retry best_pair masih None: {token_ca} "
+                  f"tetap tak ter-index Dexscreener — alert dibatalkan "
+                  f"(wallet {insider_addr or '?'}, hanya di log).")
+            return
+        labels = _insider_labels(
+            {insider_addr.lower()} if insider_addr else set())
+        wallet_label = _short_wallet(insider_addr, labels)
+        text = _dedup_check_send(insider_addr, token_ca, pair)
+        if text is None:
+            print(f"[insider] dedup: {token_ca[:10]}… ditahan (retry)")
+            return
+        print(f"[insider] ALERT (alert-only, retry {delay:.0f}s): "
+              f"{wallet_label} beli {token_ca[:10]}… — dikirim ke "
+              f"Telegram, TIDAK masuk pipa.")
+        _deliver_alert(text)
+    except asyncio.CancelledError:
+        pass  # shutdown — biarkan
+    except Exception as e:
+        print(f"[insider] retry alert fail: {e}")
 
 
 async def process_insider_buy(token_ca: str, insider_addr: str = "",
@@ -297,9 +413,30 @@ async def process_insider_buy(token_ca: str, insider_addr: str = "",
             pair = await asyncio.to_thread(dx.best_pair, token_ca)
         except Exception:
             pair = None
+    if pair is None:
+        # Token tak ter-index Dexscreener (launch baru di v4 pool, transfer
+        # langsung, dsb.) → alert akan berisik ('?', mcap $0, tanpa chart).
+        # Jangan kirim — log forensik saja, lalu RETRY SEKALI dalam ~30s
+        # di task background supaya loop tracker tidak terblok.
+        print(f"[insider] best_pair None utk {token_ca} "
+              f"(wallet {insider_addr or '?'}) — alert dibiyangkan; "
+              f"retry 1x dalam {_INSIDER_RETRY_DELAY:.0f}s.")
+        try:
+            asyncio.create_task(
+                _alert_after_retry(token_ca, insider_addr,
+                                   _INSIDER_RETRY_DELAY))
+        except RuntimeError as e:
+            # Ev-lok luar loop utama — tanpa retry supaya aman.
+            print(f"[insider] retry fail (no loop): {e} — "
+                  f"CA {token_ca} wallet {insider_addr or '?'} tak teralert.")
+        return
     labels = _insider_labels({insider_addr.lower()} if insider_addr else set())
     wallet_label = _short_wallet(insider_addr, labels)
-    text = _insider_alert_text(pair, token_ca, wallet_label)
+    text = _dedup_check_send(insider_addr, token_ca, pair)
+    if text is None:
+        print(f"[insider] dedup: {wallet_label} beli {token_ca[:10]}… "
+              f"ditahan (sudah dialert dalam jendela)")
+        return
     print(f"[insider] ALERT (alert-only): {wallet_label} beli "
           f"{token_ca[:10]}… — dikirim ke Telegram, TIDAK masuk pipa.")
     _deliver_alert(text)

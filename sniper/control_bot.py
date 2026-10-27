@@ -9,9 +9,96 @@ import traceback
 from telethon import events, Button, utils
 from . import config, db, engine, agent
 
-_pending = {}  # admin_id -> action string ("add_source" | "set:key")
+_pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
 _trader = None
 _user = None  # userbot Telethon (buat resolve channel publik via get_entity)
+
+# ======================= PANEL INSIDER (v16.6) =======================
+# Submenu di 📡 Sources. Builders = fungsi murni (diuji tanpa Telethon),
+# handler = cb._route + dobel via insaddr (input teks, pola "wimport").
+PAGE_SIZE = 10
+ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_rotate_task = None  # Task rotasi background — pengunci anti double-run
+_rotate_summary = None   # dict hasil terakhir (untuk header panel)
+
+
+def _btn_label(btn):
+    """Label tombol — menoleransi stub Button tanpa Telethon (tests)."""
+    return getattr(btn, "text", "") or ""
+
+
+def insider_addr_valid(raw):
+    """0x + 40 hex, regex ketat. Return address lower() atau None."""
+    m = ADDR_RE.match((raw or "").strip())
+    return m.group(0).lower() if m else None
+
+
+def _short_addr(addr, label=""):
+    a = (addr or "").lower()
+    if label and label.strip():
+        return label.strip()
+    return f"{a[:6]}…{a[-4:]}"
+
+
+def _insider_labels(addrs):
+    labels = {}
+    for row in db.list_insiders():
+        addr = (row.get("address") or "").lower()
+        label = (row.get("label") or "").strip()
+        if addr and label and addr in addrs:
+            labels[addr] = label
+    return labels
+
+
+def _last_seen_seen(rows):
+    vals = [int(r.get("last_seen") or 0) for r in rows]
+    return max(vals) if vals else 0
+
+
+def insider_screen_page_text():
+    rows = db.list_insiders()
+    active = [r for r in rows if r["enabled"]]
+    pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    lines = [
+        "🕵️ **Insider Wallets**",
+        f"aktif: **{len(active)} / {len(rows)}** wallet",
+    ]
+    last = _last_seen_seen(rows)
+    if last:
+        import time as _t
+        lines.append(f"last_seen terbaru: **{last_ago(last, int(_t.time()))}**")
+    if _rotate_summary:
+        s = _rotate_summary
+        lines.append(f"🔄 rotasi terakhir: +{s.get('added', 0)} / "
+                     f"prune {s.get('disabled', 0)} · "
+                     f"aktif {s.get('total_active', 0)}")
+    return "\n".join(lines), pages
+
+
+def last_ago(ts, now=None):
+    if not ts:
+        return ""
+    import time as _t
+    d = (now or int(_t.time())) - ts
+    if d < 60:
+        return f"{d}d lalu"
+    if d < 3600:
+        return f"{d // 60}m lalu"
+    if d < 86400:
+        return f"{d // 3600}j lalu"
+    return f"{d // 86400}h lalu"
+
+
+def insider_rows_text(rows):
+    now = int(__import__("time").time())
+    lines = []
+    for r in rows:
+        label = _short_addr(r["address"], r.get("label"))
+        seen = int(r.get("last_seen") or 0)
+        seen_txt = last_ago(seen, now) if seen else "—"
+        lines.append(f"• {label} · "
+                     f"w{r['win_count']}/l{r['loss_count']} · {seen_txt}")
+    return lines
 
 LINK_RE = re.compile(r"t\.me/c/(\d+)(?:/(\d+))?")
 
@@ -96,7 +183,7 @@ def sources_panel():
     lines, buttons = ["📡 **Sources**\n"], []
     if db.get("userbot_enabled", str) == "1":
         # Userbot aktif → source mirror grup relevan, tampilkan daftarnya.
-        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v2/v3/v4) + Insider Tracker (55 Wallets)")
+        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v4) + Insider Tracker (55 Wallets)")
         lines.append("📡 Userbot Telegram: **AKTIF** (mirror sinyal grup di bawah)\n")
         for s in rows:
             st = "✅" if s["enabled"] else "🚫"
@@ -108,11 +195,113 @@ def sources_panel():
             ])
     else:
         # Default v16.6: userbot non-aktif — tanpa daftar source mirror.
-        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v2/v3/v4) + Insider Tracker (55 Wallets)")
+        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v4) + Insider Tracker (55 Wallets)")
         lines.append("🔒 Userbot Telegram: **NON-AKTIF** (Akun personal aman & bebas risiko ban)")
         lines.append("_Tambah/buka source mirror: aktifkan dulu setting 'userbot_enabled'_\n")
+    insiders = db.list_insiders(only_enabled=True)
+    buttons.append([Button.inline("🕵️ Insider", b"ins:0"),
+                    Button.inline("🔥 Log Beli Insider", b"insbuys:3600")])
     buttons.append([Button.inline("« Menu", b"menu")])
     return "\n".join(lines), buttons
+
+
+def insider_buys_panel(window_sec=3600):
+    win = int(window_sec or 3600)
+    lbl = "10m" if win <= 600 else ("1j" if win <= 3600 else "24j")
+    rows = db.top_insider_buys(window_sec=win, limit=10)
+    import time as _t
+    now_i = int(_t.time())
+    lines = [f"🔥 **Log Beli Insider ({lbl} terakhir)**"]
+    if not rows:
+        lines.append("\n_Belum ada transaksi beli insider di jendela waktu ini._")
+    else:
+        lines.append("_Urutan koin paling sering dibeli dompet insider:_\n")
+        for i, r in enumerate(rows, 1):
+            ago = last_ago(r["last_ts"], now_i)
+            mc = f"${r['mcap']:,.0f}" if r.get("mcap") else "n/a"
+            lq = f"${r['liq']:,.0f}" if r.get("liq") else "n/a"
+            chart = (f" · [Chart](https://dexscreener.com/robinhood/{r['pair_address']})"
+                     if r.get("pair_address") else "")
+            lines.append(
+                f"**{i}. {r['symbol']}** — 🔥 **{r['buy_count']}x beli** "
+                f"({r['wallet_count']} wallet) · {ago}\n"
+                f"   📊 mcap {mc} · liq {lq}{chart}\n"
+                f"   `{r['ca']}`"
+            )
+    buttons = [
+        [Button.inline("✅ 10m" if win == 600 else "10m", b"insbuys:600"),
+         Button.inline("✅ 1 Jam" if win == 3600 else "1 Jam", b"insbuys:3600"),
+         Button.inline("✅ 24 Jam" if win == 86400 else "24 Jam", b"insbuys:86400")],
+        [Button.inline("🔄 Refresh", f"insbuys:{win}"),
+         Button.inline("🕵️ Insider", b"ins:0")],
+        [Button.inline("« Sources", b"sources"),
+         Button.inline("« Menu", b"menu")],
+    ]
+    return "\n".join(lines), buttons
+
+
+# ---------- panel insider (submenu Sources) ----------
+def insider_screen_panel(page=0, rows=None):
+    """Builder layar Insider — murni (diuji tanpa Telethon).
+
+    page 0-based; tiap halaman PAGE_SIZE wallet, urutan sama dengan
+    db.list_insiders() (win_count DESC, added_at DESC)."""
+    rows = rows if rows is not None else db.list_insiders()
+    pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    active_n = sum(1 for r in rows if r["enabled"])
+    seg = rows[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    text = _insider_header(rows) + "\n\n" + "\n".join(insider_rows_text(seg))
+    buttons = [[Button.inline("✅" if r["enabled"] else "🚫",
+                              f"instoggle:{page}:{r['address']}")]
+               for r in seg]
+    # nav halaman — ◀ page-1 / "i/total" (label, nonaktif) / ▶ page+1
+    nav = []
+    if page > 0:
+        nav.append(Button.inline("◀", f"inspage:{page - 1}"))
+    nav.append(Button.inline(f"{page + 1}/{pages}", b"inspagecur"))
+    if page < pages - 1:
+        nav.append(Button.inline("▶", f"inspage:{page + 1}"))
+    buttons.append(nav)
+    # aksi massal + scan
+    buttons.append([Button.inline("🔥 Log Beli Insider", b"insbuys:3600")])
+    buttons.append([Button.inline("🔍 Scan Wallet", b"insaddr"),
+                    Button.inline("🔄 Rotate Sekarang", b"insrotate")])
+    buttons.append([Button.inline("🗑 Reset (Nonaktifkan semua)", b"insreset"),
+                    Button.inline("✅ Aktifkan semua", b"insenableall")])
+    buttons.append([Button.inline("« Sources", b"sources"),
+                    Button.inline("« Menu", b"menu")])
+    return text, buttons
+
+
+def _insider_header(rows):
+    active_n = sum(1 for r in rows if r["enabled"])
+    last = _last_seen_seen(rows)
+    lines = [f"🕵️ **Insider Wallets** — aktif **{active_n}/{len(rows)}**"]
+    if last:
+        import time as _t
+        lines.append(f"🕒 last_seen terbaru: **{last_ago(last, int(_t.time()))}**")
+    if _rotate_summary:
+        s = _rotate_summary
+        lines.append(f"🔄 rotasi terakhir: +{s.get('added', 0)} baru · "
+                     f"prune {s.get('disabled', 0)} · "
+                     f"aktif {s.get('total_active', 0)}")
+    return "\n".join(lines)
+
+
+def _insider_confirm_reset_text(rows):
+    texts = [
+        "🗑 **Nonaktifkan SEMUA wallet insider?**",
+        "",
+        "Semua wallet akan di-set `enabled = 0` (tracker berhenti",
+        "pantau sementara). ⚠️ TIDAK ada yang dihapus — data skor",
+        "tetap aman, dan bisa diaktifkan ulang lewat ✅ Aktifkan semua.",
+    ]
+    buttons = [[
+        Button.inline("🔥 Ya, nonaktifkan semua", b"insreset:yes"),
+        Button.inline("✋ Batal", b"insreset:no"),
+    ]]
+    return "\n".join(texts), buttons
 
 
 MAIN_SETTING_KEYS = ["buy_usd", "tp1", "tp2", "sl"]
@@ -197,7 +386,7 @@ def wallet_panel():
         row.append(Button.inline("🗑", f"wdel:{w['id']}"))
         buttons.append(row)
     buttons.append([Button.inline("➕ Generate", b"wgen"), Button.inline("📥 Import", b"wimport")])
-    buttons.append([Button.inline("🔄 Reset Saldo ($100)", b"paper_reset_100"),
+    buttons.append([Button.inline("🔄 Reset Saldo", b"paper_reset"),
                     Button.inline("➕ Tambah $50", b"paper_add_50")])
     buttons.append([Button.inline("« Menu", b"menu")])
     wallet_lines = [
@@ -370,6 +559,19 @@ def register(bot, trader, user_client=None):
             return
         if action == "add_source":
             await _do_add_source(event)
+        elif action == "insaddr":
+            # input teks alamat wallet untuk 🕵️ Insider → 🔍 Scan Wallet
+            addr = insider_addr_valid(event.raw_text)
+            if not addr:
+                await event.respond(
+                    "❌ Format alamat EVM salah.\n"
+                    "Kirim **satu alamat** polos: `0x` + 40 karakter hex "
+                    "(0-9, a-f).\nContoh: `0x1234abcd…` (40 hex)"
+                )
+                _pending[event.sender_id] = "insaddr"
+                return
+            await event.respond(f"🔎 Screening wallet `{addr}` di background…")
+            await _scan_wallet_done(event, addr)
         elif action == "import_wallet":
             from eth_account import Account
             pk = event.raw_text.strip()
@@ -396,6 +598,19 @@ def register(bot, trader, user_client=None):
             db.set_("agent_model", event.raw_text.strip())
             await event.respond(f"✅ model → `{event.raw_text.strip()}`")
             t, b = agent_panel()
+            await event.respond(t, buttons=b)
+        elif action == "paper_reset":
+            raw = event.raw_text.strip().lstrip("$").replace(",", "")
+            try:
+                amt = float(raw)
+                if amt <= 0:
+                    raise ValueError("harus > 0")
+            except ValueError:
+                _pending[event.sender_id] = "paper_reset"
+                return await event.respond("❌ Masukkan angka > 0 (contoh: `20` atau `100`).")
+            db.reset_paper_cash(amt)
+            await event.respond(f"✅ Saldo virtual direset ke **${amt:.2f}**")
+            t, b = wallet_panel()
             await event.respond(t, buttons=b)
         elif action.startswith("set:"):
             key = action[4:]
@@ -489,12 +704,14 @@ async def _route(event, data):
     elif data == "wallet":
         t, b = wallet_panel()
         await event.edit(t, buttons=b)
-    elif data == "paper_reset_100":
-        db.reset_paper_cash(100.0)
-        await event.answer(f"Saldo virtual direset ke $100.00 "
-                           f"(kas ${db.get_paper_cash():.2f})")
-        t, b = wallet_panel()
-        await event.edit(t, buttons=b)
+    elif data in ("paper_reset", "paper_reset_100"):
+        _pending[event.sender_id] = "paper_reset"
+        await event.respond(
+            f"🔄 **Reset Saldo Virtual**\n"
+            f"Kas sekarang: **${db.get_paper_cash():.2f}** "
+            f"(Modal awal: ${float(db.get('paper_initial_usd') or 0):.2f})\n\n"
+            f"Kirim nominal saldo baru (USD, contoh: `20` atau `100`):"
+        )
     elif data == "paper_add_50":
         new_cash = db.add_paper_cash(50.0)
         await event.answer(f"Ditambah $50 ke kas virtual "
@@ -598,6 +815,97 @@ async def _route(event, data):
             "(publik maupun private), baru bisa dipantau.\n"
             "💡 Gak tau chat_id private-nya? Ketik /id lalu forward 1 pesan dari channel itu."
         )
+    elif data.startswith("ins:"):
+        # 🕵️ Insider — buka layar yang ada di dalam 📡 Sources
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            page = 0
+        t, b = insider_screen_panel(page)
+        await event.edit(t, buttons=b)
+    elif data.startswith("insbuys"):
+        parts = data.split(":", 1)
+        win = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3600
+        t, b = insider_buys_panel(win)
+        try:
+            await event.edit(t, buttons=b)
+        except Exception:
+            pass
+    elif data.startswith("inspage:"):
+        page = data.split(":", 1)[1]
+        t, b = insider_screen_panel(int(page)) if page.isdigit() \
+            else insider_screen_panel(0)
+        try:
+            await event.edit(t, buttons=b)
+        except Exception:
+            pass
+    elif data == "inspagecur":
+        await event.answer()  # indikator halaman tidak bisa diklik
+    elif data.startswith("instoggle:"):
+        # instoggle:<page>:<addr> → toggle_insider + refresh page yang sama
+        _, page_s, addr = data.split(":", 2)
+        new_state = db.toggle_insider(addr)
+        if new_state is None:
+            return await event.answer("wallet tidak ada", alert=True)
+        await event.answer("✅ diaktifkan" if new_state else "🚫 dinonaktifkan")
+        t, b = insider_screen_panel(int(page_s or 0))
+        await event.edit(t, buttons=b)
+    elif data == "insaddr":
+        _pending[event.sender_id] = "insaddr"
+        await event.respond(
+            "🔍 **Scan Wallet** — kirim alamat wallet EVM polos untuk "
+            "di-screening.\n"
+            "Format: `0x` + 40 hex.\n"
+            "_Kirim satu alamat per pesan._")
+    elif data == "insrotate":
+        global _rotate_task, _rotate_summary
+        if _rotate_task is not None and not _rotate_task.done():
+            return await event.answer("🔄 rotasi sedang berjalan…", alert=True)
+        _rotate_summary = None
+        _rotate_task = asyncio.create_task(_rotate_now(event))
+    elif data == "insreset":
+        rows = db.list_insiders()
+        if not rows:
+            return await event.answer("belum ada wallet", alert=True)
+        t, b = _insider_confirm_reset_text(rows)
+        await event.edit(t, buttons=b)
+    elif data == "insreset:no":
+        t, b = insider_screen_panel(0)
+        await event.edit(t, buttons=b)
+    elif data == "insreset:yes":
+        rows = db.list_insiders()
+        for r in rows:
+            if r["enabled"]:
+                db.toggle_insider(r["address"])
+        db.set_("auto_rotate_lock", "0")
+        await event.answer(f"🚫 {len(rows)} wallet dinonaktifkan"
+                           " (tidak ada yang dihapus)")
+        t, b = insider_screen_panel(0)
+        await event.edit(t, buttons=b)
+    elif data == "insenableall":
+        rows = db.list_insiders()
+        for r in rows:
+            if not r["enabled"]:
+                db.toggle_insider(r["address"])
+        await event.answer(f"✅ {len(rows)} wallet diaktifkan")
+        t, b = insider_screen_panel(0)
+        await event.edit(t, buttons=b)
+    elif data.startswith("insconf:"):
+        # Tambah wallet hasil screening ke insider — via add_insider_wallet
+        _, addr, ca = data.split(":", 2)
+        if not insider_addr_valid(addr):
+            return await event.answer("❌ alamat invalid", alert=True)
+        db.add_insider_wallet(addr, label="manual_panel", win_count=1,
+                              notes=f"scan: {ca}", win_cas=ca,
+                              update_if_exists=True)
+        was_before = any(r["address"] == addr.lower()          # prior exist
+                         for r in db.list_insiders())
+        await event.answer("✅ +1 win (sudah ada)" if was_before
+                           else "✅ ditambah ke insider")
+        await event.respond(
+            f"✅ **{addr}** masuk daftar insider.\n"
+            f"`{addr}` · win +1 · label `manual_panel`\n"
+            f"_dedupe: kalau wallet sudah ada, win_count-nya naik (bukan duplikat)._")
     elif data.startswith("setval:"):
         _, key, val = data.split(":", 2)
         db.set_(key, val)
@@ -684,3 +992,126 @@ async def _do_add_source(event):
                         f"_pastikan akun userbot sudah join channel ini, kalau belum sinyalnya gak kebaca._")
     t, b = sources_panel()
     await event.respond(t, buttons=b)
+
+
+# ---------- insider: background helpers (screening & rotasi) ----------
+
+async def _rotate_now(event):
+    """Jalankan rotasi pakai tools/rotate_insiders.rotate() yang sudah ada —
+    di background thread. Ringkasan ke chat; klik ganda diblokir _rotate_task."""
+    global _rotate_summary
+    import time as _t
+    await event.respond("🔄 Rotasi wallet insider dimulai: kumpulkan runner "
+                        "on-chain, prune, rekrut…")
+    started = int(_t.time())
+    try:
+        summary = await asyncio.to_thread(_invoke_rotate)
+    except Exception as e:
+        traceback.print_exc()
+        await event.respond(f"⚠️ rotasi gagal: {e}")
+        return
+    if summary is None:
+        await event.respond("⚠️ modul tools/rotate_insiders.load failed — "
+                            "lihat log console bot.")
+        return
+    _rotate_summary = summary
+    await event.respond(_rotate_report(summary, started))
+
+
+def _invoke_rotate():
+    """Impor dynamic rotate dari tools/rotate_insiders (optional module)."""
+    import importlib
+    mod = importlib.import_module("tools.rotate_insiders")
+    if not hasattr(mod, "rotate"):
+        raise AttributeError("tools.rotate_insiders.rotate tidak ada")
+    return mod.rotate()
+
+
+def _rotate_report(s, started=None):
+    if s.get("dry"):
+        return (f"🔄 Rotasi selesai ('{'dry-run'}': tidak ada perubahan DB):\n"
+                f"runner: {s.get('runners', 0)} · kandidat baru: "
+                f"{s.get('new_candidates', 0)} · prune: {s.get('disabled', 0)}\n"
+                f"Dry-run: pakai CLI --dry-run di layar untuk ini.")
+    from datetime import datetime
+    took = None
+    if started:
+        took = datetime.fromtimestamp(started).strftime("%H:%M")
+    return (
+        "🔄 **Rotasi insider selesai**"
+        + (f" (mulai {took})" if took else "") + "\n"
+        f"🧹 prune (nonaktif): **{s.get('disabled', 0)}**\n"
+        f"➕ recruit baru: **+{s.get('added', 0)}**\n"
+        f"📊 total aktif sekarang: **{s.get('total_active', 0)}**\n"
+        f"⛽ dari koin runner: {s.get('runners', 0)}"
+            + (f" (kandidat {s.get('new_candidates', 0)})"
+               if s.get("new_candidates") else "")
+    )
+
+
+async def _scan_wallet_done(event, addr):
+    """Screening satu alamat wallet — background, pakai file yang sama
+    (tools.screen_insiders). Hasil kandidat → respond tombol Tambah."""
+    global _rotate_summary
+    import time as _t
+    started = int(_t.time())
+    try:
+        import tools.screen_insiders as _si
+    except ImportError as e:
+        await event.respond(f"⚠️ tools/screen_insiders.load failed: {e}")
+        return
+    try:
+        rows = await asyncio.to_thread(
+            _screen_one_wallet, _si, addr)
+    except Exception as e:
+        traceback.print_exc()
+        await event.respond(f"⚠️ screening gagal: {e}")
+        return
+    if not rows:
+        # hasil kosong: bukan error — wallet ini gak masuk cross-check
+        await event.respond(
+            f"🔎 Screening wallet `{addr}`: **TIDAK lolos** krisis sabar.\n"
+            f"Alasan: wallet ini tidak muncul di &gt;2 koin pemenang fase awal "
+            f"(coba lagi saat koin runner baru muncul).")
+        return
+    for _addr, cnt, cas in rows[:1]:
+        btn = [[Button.inline("✅ Tambah ke insider",
+                              f"insconf:{_addr}:{(cas or ['0x0'])[0][:42]}")],
+               [Button.inline("« Sources", b"sources"),
+                Button.inline("« Menu", b"menu")]]
+        await event.respond(
+            f"🔎 **Hasil screening wallet**\n"
+            f"`{_addr}`\n"
+            f"poin: **{cnt}** (di {len(cas)} koin pemenang)\n"
+            f"detect: {(int(_t.time()) - started)}s\n"
+            f"➕ Layak masuk daftar insider — tap tombol untuk tambah:\n"
+            f"(TIDAK otomatis)",
+            buttons=btn)
+
+
+def _screen_one_wallet(si, addr):
+    """Screening 1 alamat (CA token pemenang atau wallet):
+    pakai fetch_early_buyers + cross_check yang sudah ada."""
+    addr = (addr or "").lower()
+    try:
+        si.fetch_early_buyers(addr)
+    except Exception:
+        pass
+    try:
+        rows = si.cross_check([addr]) or []
+    except Exception:
+        rows = []
+    if rows:
+        return [r for r in rows if r[0] == addr] or rows[:1]
+    try:
+        cas_all = si.fetch_gainers(10) or []
+    except Exception:
+        return []
+    if not cas_all:
+        return []
+    try:
+        rows = si.cross_check(cas_all) or []
+    except Exception:
+        return []
+    return [r for r in rows if r[0] == addr]
+

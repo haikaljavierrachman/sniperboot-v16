@@ -365,20 +365,16 @@ def _decode_error(revert_bytes):
                 inner = str(payload)
         except Exception:
             inner = revert_bytes[4:].hex()
+        inner_clean = inner.removeprefix("0x").lower()
+        if inner_clean.startswith(ERR_NOT_ENOUGH_LIQUIDITY[2:].lower()):
+            return "not_enough_liquidity", "NotEnoughLiquidity(bytes32)"
         return "bad_revert", inner or "UnexpectedRevertBytes"
     return "bad_revert", revert_bytes[:4].hex()
 
 
-def quote_buy(pool_key_tuple, amount_in_wei, w3):
-    """Quoter V4Quoter.quoteExactInputSingle beli ETH→token (zeroForOne=True,
-    currency0 = sentinel alamat nol = ETH native).
-
-    pool_key_tuple: PoolKey sniper.v4 atau tuple 5 elemen.
-    Return QuoteResult:
-      .ok True       → .amount_out (wei token, 18 dec umumnya)
-      kind=not_enough_liquidity → pool kering (kasus grok), jangan buy.
-      kind=bad_revert → payload dikupas; catat untuk diagnosa.
-    """
+def _quote_single(pool_key_tuple, zero_for_one: bool, amount_in: int, w3):
+    """Inti V4Quoter.quoteExactInputSingle untuk buy (zero_for_one=True)
+    maupun sell (zero_for_one=False)."""
     if w3 is None:
         return QuoteResult(False, error="w3 None", kind="error")
     try:
@@ -390,7 +386,7 @@ def quote_buy(pool_key_tuple, amount_in_wei, w3):
         q = w3.eth.contract(Web3.to_checksum_address(V4_QUOTER), abi=V4_QUOTER_ABI)
         params = (
             (pk.currency0, pk.currency1, pk.fee, pk.tickSpacing, pk.hooks),
-            True, int(amount_in_wei), b"")
+            bool(zero_for_one), int(amount_in), b"")
         out = q.functions.quoteExactInputSingle(params).call()
         return QuoteResult(True, int(out[0]), kind="ok")
     except Exception as e:
@@ -431,6 +427,18 @@ def quote_buy(pool_key_tuple, amount_in_wei, w3):
                                error=detail if kind != "bad_revert" else detail,
                                kind=kind)
         return QuoteResult(False, error=str(e), kind="error")
+
+
+def quote_buy(pool_key_tuple, amount_in_wei, w3):
+    """Quoter V4Quoter.quoteExactInputSingle beli ETH→token (zeroForOne=True,
+    currency0 = sentinel alamat nol = ETH native)."""
+    return _quote_single(pool_key_tuple, True, amount_in_wei, w3)
+
+
+def quote_sell(pool_key_tuple, amount_in_tokens_raw, w3):
+    """Quoter V4Quoter.quoteExactInputSingle jual token→ETH (zeroForOne=False,
+    currency1 = token → currency0 = ETH native)."""
+    return _quote_single(pool_key_tuple, False, amount_in_tokens_raw, w3)
 
 
 def _tuple5(t):
