@@ -1,76 +1,56 @@
-# Hoodsniper v16.6
+# Hoodsniper v16.8
 
-Bot sniper on-chain untuk Robinhood Chain (chain id `4663`). Entry dan exit di Uniswap v4 dan v2, plus copy-trade dari wallet insider yang dilacak otomatis.
+Bot sniper on-chain murni **Uniswap v4** untuk **Robinhood Chain** (`chainId 4663`), dilengkapi radar intel **Insider Tracker** yang terpisah dari pipa eksekusi.
 
-Bukan bot "AI trading". Logika entry utamanya aritmatika dan pembacaan state pool. LLM cuma dipakai kalau mode MATA dinyalakan, dan itu opsional.
+Bukan bot "AI trading". Logika entry dan exit utamanya berbasis pembacaan state pool Uniswap v4 (`PoolManager`, `StateView`, dan `V4Quoter`) secara langsung di atas rantai. LLM hanya dipakai bila mode MATA diaktifkan secara eksplisit.
 
-## Yang dipantau
+## Arsitektur Sumber Sinyal (v16.8)
 
-Tiga sumber sinyal, semuanya on-chain:
+1. **On-Chain Scanner (Murni Uniswap v4):**
+   - Memantau event `Initialize` langsung dari kontrak `PoolManager` Uniswap v4 (`0x05b5...`). Seluruh jalur warisan Uniswap v2/v3 dan Pons telah dihapus dari hulu ke hilir.
+   - **Antrean Retry Cerdas (`pending_pools`):** Koin v4 baru yang belum ter-index atau masih menunggu likuiditas ditahan di antrean dan dicoba ulang tiap `20 detik` sampai lolos atau melewati batas umur maksimal.
 
-- event `Initialize` dari factory Uniswap v4 dan v2
-- event `TokenLaunched` dari launchpad Pons V2
-- pembelian oleh 58 wallet insider, skornya diperbarui tiap posisi ditutup
+2. **Insider Tracker (Alert-Only Radar + Log Beli Insider):**
+   - Berjalan **terpisah penuh dari pipa eksekusi buy** (`insider_alert_only=1` default): tidak membuka posisi otomatis, tanpa batas umur pool (*age gate*), dan nol panggilan RPC tambahan.
+   - **Dedup Per-CA (10 Menit):** Satu koin maksimal mengirim 1 notifikasi ke ruang chat tiap 10 menit meskipun dibeli oleh banyak dompet insider sekaligus.
+   - **Panel `🔥 Log Beli Insider`:** Seluruh transaksi beli dari dompet insider direkam ke tabel `insider_buys` dan dapat dipantau kapan saja lewat menu **`📡 Sources` → `🔥 Log Beli Insider`** (filter `10m`, `1 Jam`, `24 Jam`, diurutkan berdasarkan jumlah transaksi & dompet unik).
 
-Wallet insider dirotasi tiap 6 jam. Yang tidak pernah menang dipangkas otomatis.
+## Gate Entry
 
-## Gate entry
+Urutan saringan dirancang dari yang paling murah ke pemeriksaan on-chain:
 
-Urutannya penting. Yang gagal di awal tidak lanjut ke pemeriksaan yang mahal.
+- **Umur Pool:** `10` sampai `300 detik` (5 menit).
+- **Likuiditas & Market Cap:** Likuiditas minimal **$4.000**, Market Cap **$5.000 – $35.000**, dan rasio Likuiditas/Market Cap minimal **35%**.
+- **Audit Keamanan (Fail-Closed):** Pemeriksaan bytecode (`mint`, `blacklist`, `setFee`), kepemilikan Dev maksimal **4%**, dan Top 10 Holder (di luar pool/kontrak) maksimal **30%**. Bila Blockscout atau RPC gagal merespons, token otomatis ditolak.
+- **Kuoter Spot On-Chain (`V4Quoter`):** Menghitung harga beli riil dan *effective market cap* setelah dikurangi token yang sudah dibakar (`0x...dEaD` & `0x000...000`). Seluruh notifikasi BUY menampilkan **100% Market Cap On-Chain aktual**, bukan angka cache layar Dexscreener.
 
-Umur pool 10 sampai 300 detik. Di bawah 10 detik pool masih terlalu dekat dengan deploy, bot tidak ikut masuk. Di atas 5 menit dianggap bukan launch baru.
+## Pagar Anti-Scam & Clone Guard
 
-Likuiditas minimal $4.000. Market cap $5.000 sampai $35.000. Rasio likuiditas terhadap market cap minimal 35%.
+- **Clone / Operator-Family Guard:** Mengenali keluarga koin dari sidik jari bytecode ditambah simbol, nama, serta jaringan pendana (*funder*) deployer. Jika satu koin dalam keluarga terdeteksi rug, kloningan berikutnya langsung ditolak di jalur cepat.
+- **Rate Limit Keluarga:** Maksimal **3 entry per keluarga operator per 24 jam**.
 
-Audit bytecode mencari `mint()`, `blacklist()`, dan `setFee()` yang disembunyikan. Dev maksimal pegang 4% supply, top 10 holder di luar pool dan kontrak token maksimal 30%. Kalau Blockscout timeout, token ditolak. Fail-closed, bukan dilewatkan.
+## Strategi Exit Anti-Cabut LP (v16.8)
 
-Terakhir quoter on-chain dengan `min_out = 0` untuk membaca harga spot asli, bukan harga Dexscreener yang telat 20 sampai 40 detik. Kalau market cap hasil quote di atas $35.000, entry dibatalkan. Token yang dibakar ke `0x...dEaD` dan `0x000...000` dikurangkan dulu dari supply, supaya angka market cap tidak membengkak sekitar 4x.
+Berdasarkan audit riwayat pool Uniswap v4 di Robinhood Chain, mayoritas pencabutan likuiditas (*LP pull*) oleh deployer terjadi pada rentang menit ke-5 hingga ke-7 (`300s–425s`). Parameter exit v16.8 dikalibrasi untuk keluar sebelum jendela tersebut:
 
-Ada satu gate lagi khusus jalur insider. Umur pool dicek di tracker, sebelum token masuk pipeline. Token berumur berhari-hari tidak pernah sampai ke tahap audit, tidak lagi menghabiskan kuota RPC dan tidak mengirim notifikasi.
+- **TP1 di `+20%`:** Jual **60%** posisi untuk mengamankan modal pokok lebih dini.
+- **TP2 di `+45%`:** Jual **100% sisa posisi** (tanpa menyisakan *moonbag* yang rawan hangus saat pool dicabut).
+- **Time-Stop `240 Detik` (4 Menit):** Posisi yang belum menyentuh target ditutup bersih pada menit ke-4, sebelum jendela rata-rata dev mencabut LP.
+- **Stop Loss `-30%` & Deteksi Darurat LP Kosong:** Bila `v4.get_pool_liquidity` mendeteksi likuiditas on-chain jatuh ke `0`, bot langsung memicu *emergency exit*.
+- **Basis Harga On-Chain Seragam:** Perhitungan `pnl`, `peak_price`, dan *trailing stop* di `engine.py` seluruhnya diturunkan dari hasil kuoter jual `V4Quoter` on-chain (`quote_sell_eth`), sehingga bebas dari pemicu palsu akibat jeda cache harga layar.
 
-## Dua mode entry
+## Mode Latihan (Paper Trading)
 
-**FAST-PATH** (default). Semua pemeriksaan di atas dihitung dalam milidetik. Nol panggilan LLM.
+- Menggunakan kuoter beli (`quote_buy_tokens`) dan kuoter jual (`quote_sell_eth`) Uniswap v4 secara langsung di atas blockchain, lengkap dengan potongan spread entry (`2,5%`), slippage, dan beban gas.
+- Dilengkapi tombol **`🔄 Reset Saldo`** di panel **`💼 Wallet`** Telegram yang memungkinkan pengisian ulang saldo virtual dengan nominal USD bebas kapan saja.
 
-**MATA**. LLM membaca momentum dan narasi, lalu memberi conviction. Butuh 10 sampai 15 detik. Ada dry-run yang menahan buy kalau LLM tidak menjawab, jadi tidak ada keputusan berarti tidak ada posisi.
+## Diagnostik Cepat
 
-## Exit
-
-TP1 di +50%, jual 50%. TP2 di +100%, jual 50% dari sisa. Sisanya jadi moonbag, dijaga trailing stop 20% dari puncak.
-
-Stop loss -30%. Posisi biasa ditutup paksa di menit ke-7 kalau tidak bergerak. Moonbag punya dua batas: tidak aktif selama 7 menit, atau umur total 45 menit.
-
-PnL dihitung dari `quote_sell_eth` on-chain, bukan dari harga layar. Kalau likuiditas pool dicabut, posisi ditutup darurat.
-
-## Pagar tambahan
-
-Clone guard. Keluarga token dikenali dari `sha256(bytecode[:1000])` ditambah symbol dan name. Kalau satu anggota keluarga bikin rug, seluruh keluarga ditandai lewat graf funder deployer. Pengecekan di jalur entry cuma baca DB; enrichment on-chain jalan di background supaya tidak menambah latency.
-
-Rate limit keluarga. Maksimal 3 entry per keluarga operator per 24 jam. Ini yang mencegah bot masuk 9 kali ke pabrik token yang sama.
-
-Launchpad tidak diblokir. Pons tetap jadi sumber sinyal karena di sinilah token baru muncul. Yang dibatasi jumlah entry per keluarga, bukan nama launchpad-nya.
-
-## Mode latihan
-
-Default paper trading. Modal awal $20, tiap entry $5.
-
-Biaya yang dipotong meniru eksekusi nyata: gas 0,0001 ETH, spread entry 2,5%, slippage 2%. Tanpa ini hasil paper akan terlihat lebih bagus daripada kenyataan.
-
-Live butuh wallet burner terpisah dan `WALLET_PRIVATE_KEY` di `.env`.
-
-## Telegram
-
-Panel pakai Bot API resmi. Tidak ada userbot, jadi akun Telegram pribadi tidak ikut berisiko.
-
-Notifikasi buy dan skip membawa angka gate: umur, likuiditas, market cap, rasio, dev, top10, dan market cap on-chain. Alasan skip yang tidak bisa ditindaklanjuti, misalnya umur, tidak dikirim ke Telegram tapi tetap masuk log.
-
-Untuk mengecek satu CA tanpa menunggu bot:
+Untuk menguji kelayakan satu alamat kontrak (CA) terhadap seluruh gerbang saringan tanpa menunggu siklus bot:
 
 ```bash
 python3 tools/gate_metrics.py 0x...
 ```
-
-Perintah itu memakai fungsi gate yang sama dengan bot, jadi angkanya identik. Tambahkan `--fast` kalau mau berhenti di kegagalan pertama.
 
 ## Menjalankan
 
@@ -87,17 +67,13 @@ chmod 600 .env
 Isi `.env`: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_ID`, `RPC_URL`, `WALLET_PRIVATE_KEY`.
 
 ```bash
-bash tests/run_all.sh        # 23 file tes
+bash tests/run_all.sh
 pm2 start ecosystem.config.js
 pm2 logs hoodsniper-v16
 ```
 
 ## Keamanan
 
-Jangan buka port ke publik. Akses remote lewat Tailscale atau Cloudflare Tunnel.
-
-Pakai wallet burner dengan saldo kecil. Jangan pernah pakai private key dompet utama.
-
-`.env` dan file `.session` harus `chmod 600`.
-
-Kalau audit on-chain gagal karena RPC atau Blockscout bermasalah, token ditolak.
+- Jangan pernah membuka port ke publik; gunakan Tailscale atau Cloudflare Tunnel.
+- Gunakan dompet *burner* khusus dengan modal terukur, jangan gunakan *private key* dompet utama.
+- Pastikan `.env` dan seluruh file database/backup memiliki izin akses `chmod 600`.
