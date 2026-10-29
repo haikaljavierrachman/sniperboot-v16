@@ -24,6 +24,44 @@ async def _sell_lock(pos_id: int) -> asyncio.Lock:
 def _txlink(h):
     return f"[🔍 tx]({config.EXPLORER_URL}/tx/{h})" if h else ""
 
+
+# ---------- 🎭 Kebijakan CA vanity ...7777 (v16.9, Opsi B) ----------
+def is_vanity_7777(ca) -> bool:
+    """True bila alamat kontrak berakhiran 7777 (abaikan prefix 0x).
+    Hanya dipakai untuk kebijakan opsional — data 107 posisi menunjukkan
+    sufiks ini BUKAN prediktor rug (19% vs 18%)."""
+    h = str(ca or "").strip().lower()
+    if h.startswith("0x"):
+        h = h[2:]
+    return h.endswith("7777")
+
+
+def effective_max_hold(pos, base_sec: int) -> int:
+    """Time-stop efektif untuk satu posisi.
+
+    Default: nilai global `max_hold_sec` apa adanya (vanity7777_enabled=0).
+    Bila operator menyalakan `vanity7777_enabled=1`, posisi dengan CA
+    berakhiran 7777 memakai batas yang lebih pendek (min dari keduanya).
+    """
+    try:
+        base = int(base_sec or 0)
+    except (TypeError, ValueError):
+        base = 0
+    if base <= 0 or not is_vanity_7777(pos.get("ca")):
+        return base
+    try:
+        if int(float(db.get("vanity7777_enabled", str) or 0)) != 1:
+            return base
+    except (TypeError, ValueError):
+        return base
+    try:
+        cap = int(float(db.get("vanity7777_max_hold_sec", str) or 0))
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        return base
+    return min(base, cap)
+
 _trader = None
 _notify = None  # async fn(text, buttons=None, **kw)
 _thin_warned = set()  # pos_id yang sudah dikasih warning pool tipis (anti-spam)
@@ -342,6 +380,9 @@ async def _check(pos):
         max_hold_sec = int(float(status_raw or 1200))
     except (TypeError, ValueError):
         max_hold_sec = 1200
+    # v16.9 (Opsi B): kebijakan khusus CA ...7777 — default no-op
+    # (vanity7777_enabled=0), hanya mempersingkat kalau operator menyalakan.
+    max_hold_sec = effective_max_hold(pos, max_hold_sec)
     now_ts = int(_t.time())
     pos_age = now_ts - (pos.get("ts") or now_ts)
     # 🚀 Time-Stop Exemption: moonbag lapis 3 (tp2_done=1) sudah 100%

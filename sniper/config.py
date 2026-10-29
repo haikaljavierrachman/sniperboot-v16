@@ -87,6 +87,16 @@ SETTING_DEFAULTS = {
     # hard cap: 45 menit batas maksimal runner moonbag → HARVEST FULL.
     "moonbag_inactivity_sec": "420",
     "moonbag_max_hold_sec":   "2700",
+    # ---- 🎭 Aturan khusus CA vanity berakhiran ...7777 (v16.9, Opsi B) ----
+    # TEMUAN DATA (107 posisi closed): rug rate ...7777 = 19% vs non-7777
+    # = 18%; avg PnL ...7777 +28.6% vs non-7777 +32.2%. Secara statistik
+    # TIDAK ADA bedanya — sufiks 7777 bukan prediktor rug. Karena itu
+    # default DISABLED supaya tidak memotong winner yang justru keluar
+    # lewat TIMEOUT di menit 4 (avg +43%).
+    # Kalau operator tetap mau mengetatkan: set vanity7777_enabled=1 dan
+    # time-stop khusus 7777 dipakai (min dari max_hold_sec & nilai ini).
+    "vanity7777_enabled":      "0",
+    "vanity7777_max_hold_sec": "120",
     "paused":         "0",
     "safety_on":      "1",
     "dev_max_pct":    "5",
@@ -197,6 +207,8 @@ SETTING_LABELS = {
     "poll_seconds":  "⏱ Interval cek harga (dtk)",
     "max_hold_sec":  "⏱ Batas max hold posisi (detik, misal 420 = 7m, 0=off)",
     "moonbag_inactivity_sec": "⏱ Moonbag: batas volume mati (detik, 0 txns m5 → EXIT INACTIVE, 420 = 7m)",
+    "vanity7777_enabled":      "🎭 Aturan khusus CA ...7777 aktif (1/0, default 0 — data tidak mendukung)",
+    "vanity7777_max_hold_sec": "🎭 Time-stop khusus CA ...7777 (detik, dipakai hanya jika vanity7777_enabled=1)",
     "moonbag_max_hold_sec":   "🏁 Moonbag: batas maksimal hold runner (detik, 2700 = 45m → HARVEST FULL)",
     "safety_on":     "🛡 Safety filter (1=on 0=off)",
     "dev_max_pct":   "🕵️ Max dev holding (%)",
