@@ -210,16 +210,17 @@ check("dev 2% (<= 4%) → lolos", ok and tag == "", f"tag={tag}")
 
 # 4b: dev 5% (> 4% Goldilocks) → skip
 listener.safety.dev_pct = lambda tr, ca: 5.0
-ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
+ok, tag, metr = asyncio.run(_fastpath_gate(CA, p_ok))
 check("dev 5% (> 4%) → skip dev_terlalu_besar",
-      not ok and tag == "dev_terlalu_besar", tag)
+      not ok and tag.startswith("dev_terlalu_besar"), tag)
+check("dev 5% → metrik memuat dev_pct=5.0", metr.get("dev_pct") == 5.0, str(metr))
 
 # 4c: safety.check menolak (honeypot) → skip
 listener.safety.dev_pct = lambda tr, ca: 0.0
 listener.safety.check = lambda tr, ca, p: (False, "honeypot selector")
-ok, tag, _ = asyncio.run(_fastpath_gate(CA, p_ok))
-check("honeypot → skip dev_terlalu_besar (gate safety)",
-      not ok and tag == "dev_terlalu_besar", tag)
+ok, tag, metr = asyncio.run(_fastpath_gate(CA, p_ok))
+check("honeypot → skip audit_kontrak (gate safety)",
+      not ok and "audit_kontrak" in tag, tag)
 
 
 # =====================================================================

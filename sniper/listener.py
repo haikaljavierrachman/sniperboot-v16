@@ -369,19 +369,62 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
     ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
     if not ok:
         print(f"[fast-safety] {ca[:10]}: {reason}")
-        return False, "dev_terlalu_besar", base
+        # Ekstrak dev_pct / top10_pct dari reason jika ada
+        m_dev = re.search(r"dev pegang ([\d\.]+)%", reason)
+        if m_dev:
+            base["dev_pct"] = float(m_dev.group(1))
+        m_top = re.search(r"top10 holders pegang ([\d\.]+)%", reason)
+        if m_top:
+            base["top10_pct"] = float(m_top.group(1))
+
+        # Jika dev_pct belum terisi, coba ambil best effort on-chain
+        if base.get("dev_pct") is None:
+            try:
+                dp = await asyncio.to_thread(safety.dev_pct, _trader, ca)
+                if dp is not None and dp >= 0:
+                    base["dev_pct"] = dp
+            except Exception:
+                pass
+
+        dp_val = base.get("dev_pct")
+        tp_val = base.get("top10_pct")
+        dp_str = f" ({dp_val:.1f}%)" if dp_val is not None else ""
+        tp_str = f" ({tp_val:.1f}%)" if tp_val is not None else ""
+
+        if "clone guard" in reason:
+            cg_sub = reason.split("clone guard:", 1)[1].strip()
+            cg_clean = cg_sub.split("(")[0].strip() or cg_sub
+            tag = f"clone_guard: {cg_clean}"
+        elif "audit kontrak" in reason or "honeypot" in reason or "signature berbahaya" in reason:
+            sub = reason.split("gagal:", 1)[-1].strip() if "gagal:" in reason else reason
+            sub_clean = sub.split("(")[0].strip() or sub
+            tag = f"audit_kontrak: {sub_clean}"
+        elif "family limit" in reason:
+            tag = "family_limit"
+        elif "top10" in reason:
+            tag = f"top10_terlalu_besar{tp_str}"
+        elif "tidak bisa diverifikasi" in reason:
+            tag = "safety_unverified"
+        else:
+            tag = f"dev_terlalu_besar{dp_str}"
+        return False, tag, base
+
     # batas dev/top10 ketat versi Goldilocks (rasio, bukan persen)
     max_dev = float(db.get("goldilocks_max_dev_pct", float) or 0.04)
     max_top = float(db.get("goldilocks_max_top10_pct", float) or 0.30)
-    dev = safety.dev_pct(_trader, ca)          # persen (0-100)
-    base["dev_pct"] = dev                      # persen — simpan SEBELUM cek
+    dev = base.get("dev_pct")
+    if dev is None:
+        dev = await asyncio.to_thread(safety.dev_pct, _trader, ca)          # persen (0-100)
+        base["dev_pct"] = dev                      # persen — simpan SEBELUM cek
     if dev and dev / 100.0 > max_dev:
-        return False, "dev_terlalu_besar", base
+        return False, f"dev_terlalu_besar ({dev:.1f}% > {max_dev*100:.0f}%)", base
     exclude = {pair.get("pairAddress", ""), ca}
-    top = safety.top_holders_pct(_trader, ca, exclude)  # persen (0-100)
-    base["top10_pct"] = top                    # persen — simpan SEBELUM cek
+    top = base.get("top10_pct")
+    if top is None:
+        top = await asyncio.to_thread(safety.top_holders_pct, _trader, ca, exclude)  # persen (0-100)
+        base["top10_pct"] = top                    # persen — simpan SEBELUM cek
     if top and top / 100.0 > max_top:
-        return False, "top10_terlalu_besar", base
+        return False, f"top10_terlalu_besar ({top:.1f}% > {max_top*100:.0f}%)", base
 
     metr = {}
     ok_m, tag, metr = ok_g, tag_g, base
