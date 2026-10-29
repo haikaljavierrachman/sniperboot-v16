@@ -19,7 +19,7 @@ import sys
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
-from sniper import config, db, engine, listener, control_bot, scanner, tracker
+from sniper import config, db, engine, listener, control_bot, scanner, tracker, clone_guard
 from sniper.trader import Trader
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -189,6 +189,7 @@ async def main():
     asyncio.create_task(scanner.scanner_loop())  # v16: scanner = sumber sinyal kedua (gabungan)
     asyncio.create_task(tracker.tracker_loop())  # v16.1: tracker insider copy-trade (sumber sinyal ketiga)
     asyncio.create_task(tracker.auto_rotation_loop(notify=notify))  # v16.3: rotasi insider otomatis 24j + scan awal instalasi baru
+    asyncio.create_task(clone_guard.parent_sync_loop(notify=notify))  # v16.9: auto-discovery koin induk & parent-shield klon parasit
 
     await notify(control_bot.main_menu_text(), buttons=control_bot.main_menu_buttons())
     runners = [bot.run_until_disconnected()]   # bot BotFather SELALU runner inti
