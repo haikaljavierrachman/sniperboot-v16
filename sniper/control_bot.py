@@ -419,7 +419,10 @@ def stats_panel():
             rate = (cl["hit_tp1"] or 0) / cl["buys"] * 100 if cl["buys"] else 0
             lines.append(f"{i}. **{cl['caller_name'] or '?'}** — {cl['buys']} call · "
                          f"{rate:.0f}% TP1 · {cl['full_tp'] or 0} full TP · {cl['stopped'] or 0} SL")
-    return "\n".join(lines), [[Button.inline("« Menu", b"menu")]]
+    buttons = [
+        [Button.inline("🔄 Reset Stats ke 0", b"stats_reset"), Button.inline("« Menu", b"menu")]
+    ]
+    return "\n".join(lines), buttons
 
 
 def agent_panel():
@@ -643,6 +646,11 @@ async def _route(event, data):
         t, b = settings_advanced_panel()
         await event.edit(t, buttons=b)
     elif data == "stats":
+        t, b = stats_panel()
+        await event.edit(t, buttons=b)
+    elif data == "stats_reset":
+        pos_id, call_id = db.reset_stats()
+        await event.answer(f"✅ Hitungan stats direset ke 0 (baseline pos #{pos_id})", alert=True)
         t, b = stats_panel()
         await event.edit(t, buttons=b)
     elif data == "agent":

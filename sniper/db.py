@@ -278,25 +278,55 @@ def add_realized(pid, eth_out):
         c.execute("UPDATE positions SET realized_eth = realized_eth + ? WHERE id=?", (eth_out, pid))
 
 
+def reset_stats(pos_id=None, call_rowid=None):
+    """Set baseline offset ID untuk perhitungan statistik tanpa menghapus riwayat DB."""
+    with _lock, _conn() as c:
+        if pos_id is None:
+            pos_id = c.execute("SELECT COALESCE(MAX(id), 0) FROM positions").fetchone()[0]
+        if call_rowid is None:
+            call_rowid = c.execute("SELECT COALESCE(MAX(rowid), 0) FROM calls").fetchone()[0]
+        now_ts = str(int(time.time()))
+        for k, v in [("stats_baseline_pos_id", str(pos_id)),
+                     ("stats_baseline_call_id", str(call_rowid)),
+                     ("stats_baseline_ts", now_ts)]:
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+    return int(pos_id), int(call_rowid)
+
+
 def stats():
     with _lock, _conn() as c:
         row = lambda q: c.execute(q).fetchone()[0]
+        get_val = lambda k: (c.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone() or [None])[0]
+        try:
+            base_pos = int(get_val("stats_baseline_pos_id") or 0)
+        except (ValueError, TypeError):
+            base_pos = 0
+        try:
+            base_call = int(get_val("stats_baseline_call_id") or 0)
+        except (ValueError, TypeError):
+            base_call = 0
+
+        pos_cond = f"WHERE id > {base_pos}"
+        pos_and = f"AND id > {base_pos}"
+        call_cond = f"WHERE rowid > {base_call}"
+
         return {
-            "calls":   row("SELECT COUNT(*) FROM calls"),
-            "buys":    row("SELECT COUNT(*) FROM positions"),
-            "open":    row("SELECT COUNT(*) FROM positions WHERE status='open'"),
-            "tp1":     row("SELECT COUNT(*) FROM positions WHERE tp1_done = 1"),
-            "tp2":     row("SELECT COUNT(*) FROM positions WHERE tp2_done = 1"),
-            "sl":      row("SELECT COUNT(*) FROM positions WHERE status='closed_sl'"),
-            "timeout": row("SELECT COUNT(*) FROM positions WHERE status IN ('closed_timeout','closed_inactive')"),
-            "manual":  row("SELECT COUNT(*) FROM positions WHERE status='closed_manual'"),
-            "rug":     row("SELECT COUNT(*) FROM positions WHERE status='closed_rug'"),
-            "trail":   row("SELECT COUNT(*) FROM positions WHERE status='closed_trail'"),
-            "tp1full": row("SELECT COUNT(*) FROM positions WHERE status='closed_tp1'"),
-            "empty":   row("SELECT COUNT(*) FROM positions WHERE status='closed_empty'"),
-            "spent":   row("SELECT COALESCE(SUM(usd_spent),0) FROM positions"),
-            "eth_out": row("SELECT COALESCE(SUM(realized_eth),0) FROM positions"),
-            "eth_in":  row("SELECT COALESCE(SUM(eth_spent),0) FROM positions"),
+            "calls":   row(f"SELECT COUNT(*) FROM calls {call_cond}"),
+            "buys":    row(f"SELECT COUNT(*) FROM positions {pos_cond}"),
+            "open":    row(f"SELECT COUNT(*) FROM positions WHERE status='open' {pos_and}"),
+            "tp1":     row(f"SELECT COUNT(*) FROM positions WHERE tp1_done = 1 {pos_and}"),
+            "tp2":     row(f"SELECT COUNT(*) FROM positions WHERE tp2_done = 1 {pos_and}"),
+            "sl":      row(f"SELECT COUNT(*) FROM positions WHERE status='closed_sl' {pos_and}"),
+            "timeout": row(f"SELECT COUNT(*) FROM positions WHERE status IN ('closed_timeout','closed_inactive') {pos_and}"),
+            "manual":  row(f"SELECT COUNT(*) FROM positions WHERE status='closed_manual' {pos_and}"),
+            "rug":     row(f"SELECT COUNT(*) FROM positions WHERE status='closed_rug' {pos_and}"),
+            "trail":   row(f"SELECT COUNT(*) FROM positions WHERE status='closed_trail' {pos_and}"),
+            "tp1full": row(f"SELECT COUNT(*) FROM positions WHERE status='closed_tp1' {pos_and}"),
+            "empty":   row(f"SELECT COUNT(*) FROM positions WHERE status='closed_empty' {pos_and}"),
+            "spent":   row(f"SELECT COALESCE(SUM(usd_spent),0) FROM positions {pos_cond}"),
+            "eth_out": row(f"SELECT COALESCE(SUM(realized_eth),0) FROM positions {pos_cond}"),
+            "eth_in":  row(f"SELECT COALESCE(SUM(eth_spent),0) FROM positions {pos_cond}"),
         }
 
 
