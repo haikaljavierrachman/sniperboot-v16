@@ -26,6 +26,18 @@ SESSION_NAME  = os.getenv("SESSION_NAME", "hoodsniper")
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
 ADMIN_ID      = _i("ADMIN_ID", 0)          # user id Telegram Kakak (cek via @userinfobot)
 
+# ---- Log publik (mode publik: orang lain HANYA lihat log filter koin) ----
+# PUBLIC_LOG_CHAT_ID: chat_id channel/grup PUBLIK tempat log filter koin
+# (SKIP/BUY/SIMULASI dari listener.process_ca) disiarkan TANPA tombol aksi.
+# Bot WAJIB jadi admin di channel itu supaya bisa posting.
+# 0 / kosong = log publik NONAKTIF (perilaku lama: semua notif cuma ke admin).
+# Cara dapat id: forward 1 pesan dari channel ke DM bot ini (perintah /id admin).
+PUBLIC_LOG_CHAT_ID = _i("PUBLIC_LOG_CHAT_ID", 0)
+# Link publik channel (mis. https://t.me/nama_channel) — ditampilkan ke
+# user non-admin saat /start supaya mereka tahu ke mana melihat log.
+# Kosong = bot hanya bilang log ada di channel publik, tanpa tombol link.
+PUBLIC_LOG_LINK    = os.getenv("PUBLIC_LOG_LINK", "").strip()
+
 # ---- Seed source awal (opsional, dipakai kalau tabel sources masih kosong) ----
 SEED_GROUP_ID    = _i("SEED_GROUP_ID", 0)  # 0 = mulai bersih (tanpa auto-seed)
 SEED_TOPIC_DEGEN = _i("SEED_TOPIC_DEGEN", 250551)

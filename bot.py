@@ -160,8 +160,28 @@ async def main():
         except Exception as e:
             print(f"[notify fail] {e}\n{text}")
 
-    engine.bind(trader, notify)
-    listener.register(user, trader, notify)
+    async def public_notify(text, buttons=None):
+        """Siaran LOG PUBLIK: hanya log filter koin (dari listener) yang
+        sampai ke fungsi ini — teks sama seperti ke admin, tapi tombol
+        SUDAH dipangkas listener (hanya URL Chart/Tx, tanpa tombol aksi).
+        Panel/posisi/TP-SL/rekap/insider TIDAK pernah lewat sini.
+        Nonaktif total bila PUBLIC_LOG_CHAT_ID belum diisi di .env."""
+        if not config.PUBLIC_LOG_CHAT_ID:
+            return
+        try:
+            await bot.send_message(config.PUBLIC_LOG_CHAT_ID, text,
+                                   buttons=buttons, link_preview=False)
+        except Exception as e:
+            print(f"[public notify fail] {e}\n{text}")
+
+    if config.PUBLIC_LOG_CHAT_ID:
+        print(f"[public-log] AKTIF → chat {config.PUBLIC_LOG_CHAT_ID} "
+              "(log filter koin disiarkan tanpa tombol aksi; panel tetap admin)")
+    else:
+        print("[public-log] nonaktif (PUBLIC_LOG_CHAT_ID kosong di .env)")
+
+    engine.bind(trader, notify, public_notify=public_notify)
+    listener.register(user, trader, notify, public_notify=public_notify)
     control_bot.register(bot, trader, user)
     asyncio.create_task(engine.monitor_loop())
     asyncio.create_task(engine.agent_review_loop())
