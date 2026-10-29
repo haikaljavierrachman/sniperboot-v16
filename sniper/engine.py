@@ -64,13 +64,62 @@ def effective_max_hold(pos, base_sec: int) -> int:
 
 _trader = None
 _notify = None  # async fn(text, buttons=None, **kw)
+_public_notify = None  # async fn(text, buttons=None) → channel log PUBLIK (opsional)
 _thin_warned = set()  # pos_id yang sudah dikasih warning pool tipis (anti-spam)
 _liq_last = {}       # pos_id -> liq USD terakhir (rug monitor)
 
 
-def bind(trader, notify):
+def bind(trader, notify, public_notify=None):
     global _trader, _notify
     _trader, _notify = trader, notify
+    if public_notify is not None:
+        bind_public_notify(public_notify)
+
+
+def bind_public_notify(fn):
+    """Pasang/lepas callback siaran hasil exit ke channel publik."""
+    global _public_notify
+    _public_notify = fn
+
+
+# ---------- SIARAN HASIL EXIT KE PUBLIK ----------
+# Atas permintaan operator (2026-10-29): bukan cuma log filter yang
+# disiarkan, HASIL EXIT posisi juga (teks execute_sell: TP1/TP2/SL/
+# trail/timeout/rug/inactive + pengumuman emergency exit + exit oleh
+# TANGAN + kegagalan exit). Yang TIDAK disiarkan dari modul ini:
+# rekap harian, insting agent, dan peringatan "TP ditahan (pool tipis)"
+# — itu bukan hasil exit.
+# Versi publik DISENSOR satu hal: angka "Saldo kas: $X" (saldo kas
+# virtual absolut) dibuang; PnL terealisasi & kas balik per posisi
+# tetap tampil (itu memang isi hasil exit yang diminta untuk disiarkan).
+import re as _re
+
+_SALDO_KAS_RE = _re.compile(r"\s*\|\s*Saldo kas: \*\*\$[\d.,]+\*\*")
+_SALDO_KAS_RE2 = _re.compile(r"Saldo kas: \*{0,2}\$[\d.,]+\*{0,2}")
+
+
+def public_exit_text(text):
+    """Bersihkan teks hasil exit untuk publik: buang angka saldo kas."""
+    out = _SALDO_KAS_RE.sub("", text or "")
+    out = _SALDO_KAS_RE2.sub("", out)
+    return out
+
+
+async def _notify_exit(text, buttons=None):
+    """Fan-out SATU hasil exit: admin (lengkap) + publik (disensor).
+
+    Tombol untuk publik dipangkas listener.public_buttons (hanya URL).
+    Kegagalan kirim ke publik tidak pernah menggagalkan notif admin
+    maupun monitor posisi."""
+    if _notify is not None:
+        await _notify(text, buttons=buttons)
+    if _public_notify is not None:
+        try:
+            from .listener import public_buttons
+            await _public_notify(public_exit_text(text),
+                                 buttons=public_buttons(buttons))
+        except Exception as e:
+            print(f"[public-exit fail] {e}")
 
 
 async def current_pair(pos):
@@ -337,7 +386,7 @@ async def _check(pos):
         import time as _t
         db.update_position(pos["id"], status="closed_empty", closed_at=int(_t.time()))
         _cleanup(pos["id"])
-        await _notify(f"🧹 **{pos['symbol']}** sisa 0 tapi status masih open — ditutup otomatis (pembersihan)")
+        await _notify_exit(f"🧹 **{pos['symbol']}** sisa 0 tapi status masih open — ditutup otomatis (pembersihan)")
         return
     pair = await current_pair(pos)
     if not pair:
@@ -357,11 +406,11 @@ async def _check(pos):
                         # Pool di-drain / revert on-chain saat Dexscreener
                         # mati → RUG ALERT
                         _cleanup(pos["id"])
-                        await _notify(
+                        await _notify_exit(
                             f"🚨 **{pos['symbol']}** Dexscreener down & "
                             f"quote on-chain 0 ETH — RUG PULL terdeteksi "
                             f"on-chain! EMERGENCY EXIT")
-                        await _notify(await execute_sell(pos["id"], 1.0, "rug"))
+                        await _notify_exit(await execute_sell(pos["id"], 1.0, "rug"))
                         return
             except Exception:
                 pass
@@ -391,7 +440,7 @@ async def _check(pos):
     is_moonbag = bool(pos.get("tp2_done"))  # 1 = moonbag lapis 3
     if max_hold_sec > 0 and pos_age >= max_hold_sec and not is_moonbag:
         _cleanup(pos["id"])
-        await _notify(await execute_sell(pos["id"], 1.0, "timeout"))
+        await _notify_exit(await execute_sell(pos["id"], 1.0, "timeout"))
         return
 
     # ---------- 🌙 0b) MOONBAG DUAL-GUARD (v16.7) ----------
@@ -429,10 +478,10 @@ async def _check(pos):
                     pass
             if vol_dead or pool_dry:
                 _cleanup(pos["id"])
-                await _notify(
+                await _notify_exit(
                     f"⏱ **{pos['symbol']}** (Moonbag) volume mati "
                     f"(0 txns / pool kering) → EXIT INACTIVE!")
-                await _notify(await execute_sell(pos["id"], 1.0, "inactive"))
+                await _notify_exit(await execute_sell(pos["id"], 1.0, "inactive"))
                 return
         # ---- b) Hard-Cap Runner ----
         hardcap_raw = db.get("moonbag_max_hold_sec", str)
@@ -442,10 +491,10 @@ async def _check(pos):
             hardcap_sec = 2700
         if hardcap_sec > 0 and pos_age >= hardcap_sec:
             _cleanup(pos["id"])
-            await _notify(
+            await _notify_exit(
                 f"🏁 **{pos['symbol']}** (Moonbag) mencapai batas maksimal "
                 f"45m runner → HARVEST FULL!")
-            await _notify(await execute_sell(pos["id"], 1.0, "timeout"))
+            await _notify_exit(await execute_sell(pos["id"], 1.0, "timeout"))
             return
 
     # ---------- 1) RUG MONITOR: liq drop mendadak → emergency exit ----------
@@ -482,12 +531,12 @@ async def _check(pos):
             try:
                 _liq_last.pop(pos["id"], None)
                 _thin_warned.discard(pos["id"])
-                await _notify(
+                await _notify_exit(
                     f"🚨 **{pos['symbol']}** liq anjlok ${last_liq:,.0f} → ${liq:,.0f} "
                     f"({(liq/last_liq-1)*100:.0f}%) — EMERGENCY EXIT!")
-                await _notify(await execute_sell(pos["id"], 1.0, "rug"))
+                await _notify_exit(await execute_sell(pos["id"], 1.0, "rug"))
             except Exception as e:
-                await _notify(f"⚠️ Emergency exit {pos['symbol']} GAGAL (LP mungkin sudah kosong): {e}")
+                await _notify_exit(f"⚠️ Emergency exit {pos['symbol']} GAGAL (LP mungkin sudah kosong): {e}")
             return
 
     # ---------- 💹 PnL utama: quote jual on-chain RIIL ----------
@@ -515,11 +564,11 @@ async def _check(pos):
                         v4mod.liquidity, pos["pair_address"], _trader.w3)
                     if onchain_l is not None and onchain_l <= 0:
                         _cleanup(pos["id"])
-                        await _notify(
+                        await _notify_exit(
                             f"🚨 **{pos['symbol']}** LP v4 on-chain = 0 "
                             f"(walau layar Dexscreener masih ${liq:,.0f}) — "
                             f"RUG PULL ON-CHAIN! EMERGENCY EXIT")
-                        await _notify(await execute_sell(pos["id"], 1.0, "rug"))
+                        await _notify_exit(await execute_sell(pos["id"], 1.0, "rug"))
                         return
         except Exception:
             pass  # quoter gagal → fallback ke harga layar di bawah
@@ -545,7 +594,7 @@ async def _check(pos):
         # ---------- 3) sebelum TP1: SL normal dari entry ----------
         if not pos["tp1_done"] and pnl <= sl_v:
             _cleanup(pos["id"])
-            await _notify(await execute_sell(pos["id"], 1.0, "sl"))
+            await _notify_exit(await execute_sell(pos["id"], 1.0, "sl"))
             return
 
         # ---------- 4) setelah TP1: breakeven lock + trailing stop ----------
@@ -559,11 +608,11 @@ async def _check(pos):
             stop_level = max(pos["entry_price_usd"], peak * (1 - trail_dist))
             if price <= stop_level:
                 _cleanup(pos["id"])
-                await _notify(await execute_sell(pos["id"], 1.0, "trail"))
+                await _notify_exit(await execute_sell(pos["id"], 1.0, "trail"))
                 return
         elif pos["tp1_done"] and pnl <= sl_v:
             _cleanup(pos["id"])
-            await _notify(await execute_sell(pos["id"], 1.0, "sl"))
+            await _notify_exit(await execute_sell(pos["id"], 1.0, "sl"))
             return
 
         verify = (db.get("tp_verify", str) == "1") and not pos.get("is_simulated")
@@ -580,7 +629,7 @@ async def _check(pos):
                     return
             if frac >= 1.0:
                 _cleanup(pos["id"])
-            await _notify(await execute_sell(pos["id"], frac, "tp2"))
+            await _notify_exit(await execute_sell(pos["id"], frac, "tp2"))
         elif pnl >= tp1_v and not pos["tp1_done"]:
             frac = db.get("tp1_sell_pct")
             if verify:
@@ -593,9 +642,9 @@ async def _check(pos):
                             f"cuma {ep*100:+.0f}% (pool tipis) — TP1 ditahan, tunggu depth")
                     return
             _thin_warned.discard(pos["id"])
-            await _notify(await execute_sell(pos["id"], frac, "tp1"))
+            await _notify_exit(await execute_sell(pos["id"], frac, "tp1"))
     except Exception as e:
-        await _notify(f"⚠️ Gagal eksekusi sell {pos['symbol']}: {e}")
+        await _notify_exit(f"⚠️ Gagal eksekusi sell {pos['symbol']}: {e}")
 
 
 def _cleanup(pid):
@@ -630,10 +679,10 @@ async def agent_review_loop():
                 action, reason = await asyncio.to_thread(agent.review_position, pos, pair)
                 if action == "SELL_HALF":
                     result = await execute_sell(pos["id"], 0.5, "manual")
-                    await _notify(f"✋ **TANGAN exit 50%** {pos['symbol']}\n_{reason}_\n{result}")
+                    await _notify_exit(f"✋ **TANGAN exit 50%** {pos['symbol']}\n_{reason}_\n{result}")
                 elif action == "SELL_ALL":
                     result = await execute_sell(pos["id"], 1.0, "manual")
-                    await _notify(f"✋ **TANGAN exit ALL** {pos['symbol']}\n_{reason}_\n{result}")
+                    await _notify_exit(f"✋ **TANGAN exit ALL** {pos['symbol']}\n_{reason}_\n{result}")
             except Exception as e:
                 print(f"[agent-review fail] {pos['symbol']}: {e}")
 

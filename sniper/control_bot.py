@@ -107,6 +107,42 @@ def _admin(event):
     return event.sender_id == config.ADMIN_ID
 
 
+# ---------- MODE PUBLIK (user non-admin: HANYA lihat log filter koin) ----------
+# Panel (Posisi/Sources/Settings/Stats/Otak/Wallet + semua tombolnya)
+# KHUSUS admin. User lain yang membuka bot ini hanya diarahkan ke
+# channel log publik — tanpa panel, tanpa data wallet/posisi/stats.
+# Log disiarkan ke channel oleh listener._notify_log (bot.py:
+# public_notify → PUBLIC_LOG_CHAT_ID), BUKAN dari chat ini, jadi user
+# publik tidak perlu chat dengan bot untuk mengikuti log.
+def public_start_text():
+    lines = [
+        "🤖 **hoodsniper — Log Publik**",
+        "",
+        "Bot ini menampilkan **log filter koin** secara publik: setiap "
+        "koin yang disaring scanner (SKIP beserta alasannya, maupun yang "
+        "lolos → BUY/SIMULASI) disiarkan ke channel log.",
+        "",
+        "🔒 Panel kontrol bot ini **khusus admin** — posisi, wallet, "
+        "settings, dan tombol jual tidak bisa dilihat/dipakai dari sini.",
+    ]
+    if config.PUBLIC_LOG_LINK:
+        lines += ["", "📜 Ikuti log-nya di channel publik lewat tombol di bawah."]
+    elif config.PUBLIC_LOG_CHAT_ID:
+        lines += ["", "📜 Log disiarkan di channel publik bot ini — "
+                      "gabung channel-nya untuk mengikuti."]
+    else:
+        lines += ["", "📜 Channel log publik belum diaktifkan admin."]
+    return "\n".join(lines)
+
+
+def public_start_buttons():
+    """Tombol untuk user publik: HANYA tombol URL ke channel log
+    (atau None). Tidak pernah ada tombol inline/panel di sini."""
+    if config.PUBLIC_LOG_LINK:
+        return [[Button.url("📜 Lihat Log Filter Koin", config.PUBLIC_LOG_LINK)]]
+    return None
+
+
 # ---------- panel builders ----------
 def main_menu_text():
     bal = _trader.eth_balance()
@@ -114,6 +150,9 @@ def main_menu_text():
     n_open = len(db.open_positions())
     n_src = len(db.sources(only_enabled=True))
     stats = db.stats()
+    pub_line = ("\n📣 Log publik: **AKTIF** (filter koin → channel)"
+                if config.PUBLIC_LOG_CHAT_ID
+                else "\n📣 Log publik: nonaktif")
     if db.get("agent_dry_run", str) == "1":
         return (
             f"🤖 **hoodsniper v2**\n\n"
@@ -126,6 +165,7 @@ def main_menu_text():
             f"🛑 SL: {stats['sl']} | ⏱ Timeout: {stats['timeout']}\n"
             f"👛 Burner Live: `{_trader.addr}` ({bal:.5f} ETH)\n"
             f"💵 buy size: **${db.get('buy_usd'):.2f}**/call"
+            f"{pub_line}"
         )
     return (
         f"🤖 **hoodsniper v2**\n\n"
@@ -136,6 +176,7 @@ def main_menu_text():
         f"🎯 TP1: {stats['tp1']} | 🎯 TP2: {stats['tp2']} | "
         f"🛑 SL: {stats['sl']} | ⏱ Timeout: {stats['timeout']}\n"
         f"💵 buy size: **${db.get('buy_usd'):.2f}**/call"
+        f"{pub_line}"
     )
 
 
@@ -471,9 +512,33 @@ def register(bot, trader, user_client=None):
     @bot.on(events.NewMessage(pattern=r"^/start|^/menu"))
     async def start(event):
         if not _admin(event):
-            return await event.respond("⛔ Bot privat.")
+            # PUBLIK: tanpa panel, tanpa data apa pun — hanya arahan
+            # ke channel log filter koin.
+            return await event.respond(public_start_text(),
+                                       buttons=public_start_buttons())
         _pending.pop(event.sender_id, None)
         await event.respond(main_menu_text(), buttons=main_menu_buttons())
+
+    @bot.on(events.NewMessage(pattern=r"^/log"))
+    async def log_help(event):
+        """Semua user: arahkan ke log publik. Admin dapat status teknisnya."""
+        if _admin(event):
+            if config.PUBLIC_LOG_CHAT_ID:
+                status = (f"✅ **AKTIF** → `{config.PUBLIC_LOG_CHAT_ID}`"
+                          + (f"\n🔗 {config.PUBLIC_LOG_LINK}"
+                             if config.PUBLIC_LOG_LINK else ""))
+            else:
+                status = ("❌ **NONAKTIF** — isi `PUBLIC_LOG_CHAT_ID` di `.env` "
+                          "lalu restart bot.")
+            return await event.respond(
+                "📜 **Log Publik — Filter Koin**\n\n"
+                f"Status: {status}\n\n"
+                "_Yang disiarkan: SKIP/BUY/SIMULASI dari filter koin "
+                "(tanpa tombol aksi). Panel, posisi, TP/SL, rekap, dan "
+                "alert insider tetap khusus chat admin ini._",
+                buttons=public_start_buttons())
+        return await event.respond(public_start_text(),
+                                   buttons=public_start_buttons())
 
     @bot.on(events.NewMessage(pattern=r"^/id"))
     async def id_help(event):
@@ -540,7 +605,9 @@ def register(bot, trader, user_client=None):
     @bot.on(events.CallbackQuery())
     async def cb(event):
         if not _admin(event):
-            return await event.answer("⛔", alert=True)
+            return await event.answer(
+                "🔒 Panel khusus admin. Log filter koin ada di channel publik.",
+                alert=True)
         data = event.data.decode()
         try:
             await _route(event, data)

@@ -10,6 +10,80 @@ CA_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 _trader = None
 _notify = None
+_public_notify = None  # async fn(text, buttons=None) → channel log PUBLIK (opsional)
+
+
+# ---------- LOG PUBLIK (mode publik) ----------
+# SEMUA notif yang lahir di process_ca adalah "log filter koin"
+# (SKIP mcap/liq/sosmed/safety/fast-path, kartu Mata, SIMULASI BUY, BUY,
+# gagal buy). Notif itu difan-out oleh _notify_log:
+#   • admin  → teks + tombol LENGKAP (termasuk Sell 50% / Sell ALL)
+#   • publik → teks yang sama, tombol DIPANGKAS: hanya tombol URL
+#     (Chart / Tx) yang dipertahankan; semua tombol inline (callback
+#     aksi) DIBUANG — publik tidak pernah menerima tombol yang bisa
+#     memicu aksi apa pun.
+# Notif NON-filter (engine TP/SL/recap, tracker insider, panel, wallet)
+# TIDAK lewat sini — mereka memanggil notify admin langsung dan tidak
+# pernah disiarkan ke publik.
+def _is_url_button(btn):
+    """True bila tombol ini tombol URL (aman utk publik), BUKAN callback.
+
+    Menoleransi dua bentuk Telethon:
+      • lama (≤1.4x awal): KeyboardButtonUrl dengan atribut `.url`
+      • baru (1.45): KeyboardInlineButton dengan `.type` =
+        InlineButtonTypeUrl (punya `.url`); callback `.type`-nya
+        InlineButtonTypeCallback (punya `.data`, tanpa `.url`).
+    Duck-typing murni — tidak import tipe Telethon apa pun."""
+    if getattr(btn, "url", None):
+        return True
+    if type(btn).__name__ == "KeyboardButtonUrl":
+        return True
+    t = getattr(btn, "type", None)
+    if t is not None:
+        return bool(getattr(t, "url", None)) or type(t).__name__.endswith("Url")
+    return False
+
+
+def public_buttons(buttons):
+    """Pangkas tombol untuk publik: sisakan hanya tombol URL.
+
+    Menerima struktur tombol Telethon (list baris, boleh bersarang —
+    mis. baris Sell pada kartu SIMULASI adalah list di dalam list).
+    Tombol URL dipertahankan; semua tombol callback/aksi (Sell, dsb.)
+    DIBUANG. Semua tombol URL yang tersisa digabung jadi SATU baris.
+    Return None bila tidak ada tombol URL yang tersisa.
+    Fungsi murni — diuji tanpa Telethon asli (duck-typing)."""
+    flat = []
+
+    def _walk(node):
+        if isinstance(node, (list, tuple)):
+            for sub in node:
+                _walk(sub)
+        elif _is_url_button(node):
+            flat.append(node)
+
+    _walk(buttons or [])
+    return [flat] if flat else None
+
+
+async def _notify_log(text, buttons=None):
+    """Fan-out SATU log filter koin: admin (lengkap) + publik (aman).
+
+    Kegagalan kirim ke publik TIDAK PERNAH menggagalkan notif admin
+    maupun pipa filter — ditelan + dicetak ke console saja."""
+    if _notify is not None:
+        await _notify(text, buttons=buttons)
+    if _public_notify is not None:
+        try:
+            await _public_notify(text, buttons=public_buttons(buttons))
+        except Exception as e:  # channel belum siap dsb. — jangan bunuh pipa
+            print(f"[public-log fail] {e}")
+
+
+def bind_public_notify(fn):
+    """Pasang/lepas callback log publik (dipakai bot.py & tests)."""
+    global _public_notify
+    _public_notify = fn
 
 
 # ---------- format kartu keputusan Mata (rapi & konsisten) ----------
@@ -214,16 +288,21 @@ def topic_id(msg) -> int:
     return 1
 
 
-def register(user_client=None, trader=None, notify=None):
+def register(user_client=None, trader=None, notify=None, public_notify=None):
     """Pasang handler userbot. user_client OPSIONAL:
 
     - user_client is None → userbot non-aktif (default v16.6): tidak
       memasang listener apa pun, sinyal 100% dipasok scanner factory
       on-chain & tracker insider. Tidak boleh raise.
     - user_client is not None → pasang handler sinyal grup seperti biasa.
+
+    public_notify (opsional): callback siaran log filter koin ke channel
+    publik. Boleh dipasang juga belakangan via bind_public_notify().
     """
     global _trader, _notify
     _trader, _notify = trader, notify
+    if public_notify is not None:
+        bind_public_notify(public_notify)
     if user_client is None:
         print("[listener] userbot non-aktif; sinyal 100% dipasok dari "
               "scanner factory & tracker.")
@@ -585,7 +664,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
 
     if mcap <= 0 or mcap > src["mcap_max"]:
         print(f"[skip] {sym} mcap ${mcap:,.0f} > limit ${src['mcap_max']:,.0f} ({src['name']})")
-        await _notify(
+        await _notify_log(
             f"⚡ **SKIP {sym}** _via {src['name']}_\n`{ca}`\n"
             f"reason: mcap_terlalu_besar\n"
             f"📊 mcap ${mcap:,.0f} (limit ${src['mcap_max']:,.0f})"
@@ -594,7 +673,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     if liq is not None and liq < db.get("min_liq_usd"):
         # Dexscreener tahu likuiditasnya dan rendah → tolak
         print(f"[skip] {sym} liq ${liq:,.0f} < min")
-        await _notify(
+        await _notify_log(
             f"⚡ **SKIP {sym}** _via {src['name']}_\n`{ca}`\n"
             f"reason: liq_rendah\n"
             f"📊 liq ${liq:,.0f} (min ${db.get('min_liq_usd'):,.0f})"
@@ -612,13 +691,13 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     soc_ok, soc_reason = dx.social_ok(pair)
     if not soc_ok:
         print(f"[social-skip] {sym}: {soc_reason}")
-        await _notify(f"🌐 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{soc_reason}")
+        await _notify_log(f"🌐 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{soc_reason}")
         return "filtered:social"
 
     ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
     if not ok:
         print(f"[safety-skip] {sym}: {reason}")
-        await _notify(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason}")
+        await _notify_log(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason}")
         return "filtered:safety"
 
     # ---------- ⚡ FAST-PATH GOLDILOCKS (entry_mode='fast', 0 detik LLM) ----
@@ -634,7 +713,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             print(f"[fast-skip] {sym}: {tag_f}")
             if should_notify_fast_skip(tag_f):
                 gl = _fmt_gate_metrics(metr_f)
-                await _notify(
+                await _notify_log(
                     f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
                     f"`{ca}`\nreason: {tag_f}"
                     + (f"\n{gl}" if gl else ""))
@@ -666,7 +745,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         db.log_decision(ca=ca, symbol=sym, role="fastpath", action="BUY",
                         conviction=90, size_mult=1.0,
                         reason=decision["reason"], risks="goldilocks_defensive")
-        await _notify(
+        await _notify_log(
             f"⚡ **FAST-PATH BUY {sym}** _via {src['name']}_\n"
             f"`{ca}`\n📊 mcap ${mcap_oc_f:,.0f} | liq ${liq_f:,.0f} "
             f"({ratio_f * 100:.1f}%) | umur pool {age_f:.0f}s\n"
@@ -685,19 +764,19 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     if (decision and decision.get("blacklist_caller") and caller_id
             and db.get("agent_blacklist", str) == "1"):
         if db.get("agent_dry_run", str) == "1":
-            await _notify(
+            await _notify_log(
                 f"🧪 **MODE LATIHAN — Mata MAU mem-blacklist {caller_name or caller_id}**\n"
                 f"_{decision['reason']}_\n(tidak dieksekusi karena masih latihan)")
         else:
             db.add_blacklist(caller_id, caller_name, decision["reason"])
-            await _notify(
+            await _notify_log(
                 f"🚫 **MATA MEM-BLACKLIST caller {caller_name or caller_id}**\n"
                 f"_{decision['reason']}_\ncall dia berikutnya auto-skip. Kelola di panel 🧠 Otak.")
     if decision and decision["action"] == "SKIP":
-        await _notify(_agent_card(pair, ca, src["name"], decision, "SKIP"))
+        await _notify_log(_agent_card(pair, ca, src["name"], decision, "SKIP"))
         return "skip_agent"
     if decision and decision["action"] == "BUY" and decision["conviction"] < db.get("agent_min_conviction"):
-        await _notify(_agent_card(pair, ca, src["name"], decision, "RAGU",
+        await _notify_log(_agent_card(pair, ca, src["name"], decision, "RAGU",
                                   min_conv=db.get("agent_min_conviction")))
         return "skip_agent"
     # ---------- 📉 STALENESS GATE: harga sudah lari dari harga evaluasi? ----------
@@ -714,7 +793,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             fresh_price = 0.0
         max_drift = float(db.get("agent_max_drift") or 0.50)
         if fresh_price > 0 and agent.check_staleness(initial_price, fresh_price, max_drift):
-            await _notify(
+            await _notify_log(
                 f"⚡ **FAST-PATH BUY {sym} DIBATALKAN — HARGA STALE** _via {src['name']}_\n"
                 f"`{ca}`\n"
                 f"harga saat evaluasi ${initial_price:.10f} → saat eksekusi ${fresh_price:.10f} "
@@ -730,7 +809,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         # PILIH KOIN INI — jadi buka posisi SIMULASI, agar TP1/TP2/SL/trail
         # engine monitor ikut menguji rencana trading (harga on-chain
         # & saldo wallet KETIDAKTERLIBATAN sama sekali).
-        await _notify(_agent_card(pair, ca, src["name"], decision, "LATIHAN"))
+        await _notify_log(_agent_card(pair, ca, src["name"], decision, "LATIHAN"))
         eth_price = dx.eth_usd(pair)
         buy_usd = (db.get("buy_usd") * decision["size_mult"]) if decision else db.get("buy_usd")
         eth_spent = buy_usd / eth_price if eth_price > 0 else 0.0003
@@ -764,7 +843,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             ok_q, amt_raw, err_reason = False, 0, f"quoter_exception:{e}"
         if not ok_q or amt_raw <= 0:
             reason_line = err_reason or "quoter_gagal"
-            await _notify(
+            await _notify_log(
                 f"❌ **SIMULASI BUY GAGAL (On-Chain Revert)** via {src['name']}\n"
                 f"{ca}\n"
                 f"Alasan on-chain: {reason_line}\n"
@@ -779,7 +858,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         spread = float(db.get("paper_entry_spread_pct", float) or 0.025)
         entry_price_usd = entry_price_usd * (1.0 + spread)
         if tokens_total <= 0 or entry_price_usd <= 0:
-            await _notify(
+            await _notify_log(
                 f"❌ **SIMULASI BUY GAGAL (On-Chain Revert)** via {src['name']}\n"
                 f"{ca}\n"
                 f"Alasan on-chain: quoter_output_kosong (token 0 dihitung)\n"
@@ -828,7 +907,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         mcap_max = float(db.get("scanner_mcap_max", float)
                          or 0) or float(src.get("mcap_max") or 45000)
         if mcap_onchain > mcap_max:
-            await _notify(
+            await _notify_log(
                 f"❌ **SIMULASI BUY GAGAL (Mcap On-Chain Pucuk)** "
                 f"via {src['name']}\n"
                 f"{ca}\n"
@@ -857,7 +936,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         total_buy_cost = buy_usd_final + gas_usd
         if not db.deduct_paper_cash(total_buy_cost):
             # kas virtual kurang → posisi simulasi TIDAK dibuka
-            await _notify(
+            await _notify_log(
                 f"🧪 **MODE LATIHAN — BUY {sym} DIBATALKAN** _via {src['name']}_\n"
                 f"`{ca}`\n"
                 f"saldo_virtual_kurang (kas ${db.get_paper_cash():.2f} < "
@@ -890,7 +969,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             sell_line = (f"\n🎯 TP1 +{float(decision.get('tp1') or db.get('tp1'))*100:.0f}% · "
                          f"TP2 +{float(decision.get('tp2') or db.get('tp2'))*100:.0f}% · "
                          f"SL {float(decision.get('sl') or db.get('sl'))*100:.0f}% (SIMULASI aktif)")
-        await _notify(
+        await _notify_log(
             f"🧪 **[SIMULASI] BUY {sym}**  _via {src['name']}_\n"
             f"`{pos['ca']}`\n"
             f"💰 mcap ${mcap_onchain:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
@@ -915,7 +994,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     # berlaku — fallback rule-based memang perilaku yang diinginkan.
     if (decision is None and db.get("agent_on", str) == "1"
             and db.get("agent_dry_run", str) == "1"):
-        await _notify(
+        await _notify_log(
             f"🧪 **MODE LATIHAN — Mata tidak menjawab untuk {sym}** _via {src['name']}_\n"
             f"`{ca}`\nLLM error/timeout — jalur fallback rule-based DITAHAN "
             f"selama mode latihan (tidak ada keputusan = tidak ada buy).")
@@ -933,18 +1012,37 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         if decision:
             ai_line = (f"\n👁 Mata: **{decision['action']}** (conviction {decision['conviction']})"
                        f"\n_{decision['reason']}_")
-        if _notify:
-            await _notify(
+        if _notify or _public_notify:
+            await _notify_log(
                 f"🔭 **SCANNER (dry): {sym}** lolos semua filter{ai_line}\n"
                 f"`{ca}`\n💰 mcap ${mcap:,.0f} | {_fmt_liq(liq)}\n"
                 f"— buy TIDAK dieksekusi (allow_buy=False)")
         return "no_buy_scanner"
 
+    # ---------- 🧪 PAGAR KERAS MODE LATIHAN (menutup lubang fallback) ----
+    # Paper trading di pipa ini hanya menahan KEPUTUSAN (Mata/FAST-PATH
+    # → posisi simulasi). Bila TIDAK ada keputusan sama sekali — kasus
+    # nyatanya: entry_mode='mata' tetapi Mata OFF (agent_on=0) — pagar
+    # fallback di atas tidak berlaku (ia mensyaratkan agent_on=1) dan
+    # kode lama jatuh ke trader.buy LIVE dari sini, gagal di cek saldo
+    # ETH ("saldo ETH kurang") meski mode latihan. Selama agent_dry_run
+    # ON, trader.buy TIDAK BOLEH tercapai dari pipa ini lewat jalur
+    # mana pun: tidak ada keputusan simulasi = tidak ada buy. Mode LIVE
+    # (agent_dry_run=0) tidak disentuh pagar ini.
+    if db.get("agent_dry_run", str) == "1":
+        await _notify_log(
+            f"🧪 **MODE LATIHAN — buy LIVE ditahan untuk {sym}** _via {src['name']}_\n"
+            f"`{ca}`\nTidak ada keputusan entry (Mata OFF / mode mata tanpa "
+            f"keputusan) — selama mode latihan, buy betulan tidak dieksekusi "
+            f"dan tidak dicek ke saldo ETH. Aktifkan Mata/FAST-PATH untuk "
+            f"posisi simulasi, atau matikan mode latihan untuk live.")
+        return "dry_run"
+
     usd = db.get("buy_usd") * decision["size_mult"] if decision else None
     try:
         pos = await asyncio.to_thread(_trader.buy, ca, pair, src["name"], usd)
     except Exception as e:
-        await _notify(f"❌ Gagal buy **{sym}** dari _{src['name']}_: {e}")
+        await _notify_log(f"❌ Gagal buy **{sym}** dari _{src['name']}_: {e}")
         return f"buy_failed:{e}"
 
     db.open_position(**pos)
@@ -1000,7 +1098,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             + f" · top10 {_dash(_top)} (maks {max_top * 100:.0f}%)"
             + f" · mcap on-chain {_dash(_oc)} (maks ${max_oc:,.0f})")
     _mcap_live = gate.get("mcap_onchain") or mcap
-    await _notify(
+    await _notify_log(
         f"🟢 **BUY {pos['symbol']}**  _via {src['name']}_\n"
         f"`{pos['ca']}`{gate_lines}\n"
         f"💰 mcap ${_mcap_live:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
