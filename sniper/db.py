@@ -576,7 +576,11 @@ def _init_insider_wallets(c):
     # kolom opsional di data lama — aman dipanggil berulang saat init
     for col in ("win_cas TEXT DEFAULT ''", "notes TEXT DEFAULT ''",
                 "loss_count INTEGER DEFAULT 0",
-                "last_seen INTEGER DEFAULT 0"):
+                "last_seen INTEGER DEFAULT 0",
+                # v16.9: skema bobot 2 sumber (Blockscout + GeckoTerminal)
+                "score REAL DEFAULT 0",
+                "sources TEXT DEFAULT ''",
+                "last_verified INTEGER DEFAULT 0"):
         try:
             c.execute(f"ALTER TABLE insider_wallets ADD COLUMN {col}")
         except sqlite3.OperationalError:
@@ -628,10 +632,16 @@ def prune_stale_insiders(max_inactive_days: int = 3) -> int:
 
 
 def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
-                       update_if_exists=False):
+                       update_if_exists=False, score=0.0, sources="",
+                       last_verified=0, enabled=1, set_wins=False):
     """Catat/naikkan skor wallet insider. update_if_exists=True (dipakai
     screener saat wallet sudah ada tapi menang koin baru) → win_count
-    ditambah, bukan ditimpa."""
+    ditambah, bukan ditimpa.
+
+    score/sources/last_verified = hasil skema bobot 2 sumber (v16.9).
+    enabled=0 dipakai untuk baris karantina (GeckoTerminal-only, belum
+    terverifikasi Blockscout) — masuk tabel tapi tidak dipantau tracker.
+    """
     address = str(address).strip().lower()
     # 🚫 Jangan pernah rekrut alamat burn/zero sebagai "insider" — auto_rotate
     # sempat memasukkan 0x…dead dan mencemari 60% tabel insider_buys.
@@ -640,24 +650,40 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
     with _lock, _conn() as c:
         _init_insider_wallets(c)
         if update_if_exists:
-            c.execute("""INSERT INTO insider_wallets
-                (address,label,win_count,enabled,added_at,notes,win_cas)
-                VALUES(?,?,?,?,?,?,?)
+            # set_wins=True → win_count = fakta ulang (MAX, tidak pernah
+            # menyusut); set_wins=False → diakumulasi (auto_rotate).
+            wins_expr = ("MAX(win_count, excluded.win_count)" if set_wins
+                         else "win_count + excluded.win_count")
+            # Skor: scan yang mencakup CA >= sebelumnya = otoritatif (decay
+            # berlaku, boleh turun). Scan parsial (CA lebih sedikit) tidak
+            # boleh menurunkan skor — pakai yang tertinggi.
+            score_expr = ("MAX(score, excluded.score)" if not set_wins else
+                          "CASE WHEN excluded.win_count >= win_count "
+                          "THEN excluded.score ELSE MAX(score, excluded.score) END")
+            c.execute(f"""INSERT INTO insider_wallets
+                (address,label,win_count,enabled,added_at,notes,win_cas,
+                 score,sources,last_verified)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(address) DO UPDATE SET
-                    win_count = win_count + excluded.win_count,
+                    win_count = {wins_expr},
+                    score = {score_expr},
+                    sources = CASE WHEN excluded.sources = ''
+                                   THEN sources ELSE excluded.sources END,
+                    last_verified = MAX(last_verified, excluded.last_verified),
                     win_cas   = CASE WHEN excluded.win_cas = ''
                                      THEN win_cas
                                      ELSE CASE WHEN win_cas = ''
                                                THEN excluded.win_cas
                                                ELSE win_cas || ',' || excluded.win_cas END END""",
-                (address, label, int(win_count), 1, int(time.time()),
-                 notes, win_cas))
+                (address, label, int(win_count), int(enabled), int(time.time()),
+                 notes, win_cas, float(score), sources, int(last_verified)))
         else:
             c.execute("""INSERT OR IGNORE INTO insider_wallets
-                (address,label,win_count,enabled,added_at,notes,win_cas)
-                VALUES(?,?,?,?,?,?,?)""",
-                (address, label, int(win_count), 1, int(time.time()),
-                 notes, win_cas))
+                (address,label,win_count,enabled,added_at,notes,win_cas,
+                 score,sources,last_verified)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (address, label, int(win_count), int(enabled), int(time.time()),
+                 notes, win_cas, float(score), sources, int(last_verified)))
 
 
 def get_active_insiders() -> list:
@@ -687,7 +713,7 @@ def list_insiders(only_enabled=False):
         q = "SELECT * FROM insider_wallets"
         if only_enabled:
             q += " WHERE enabled=1"
-        q += " ORDER BY win_count DESC, added_at DESC"
+        q += " ORDER BY score DESC, win_count DESC, added_at DESC"
         return [dict(r) for r in c.execute(q)]
 
 

@@ -356,32 +356,41 @@ def test_screen_insiders_dual_source_scoring():
     import tools.screen_insiders as si
     W1 = "0x" + "a" * 40
     W2 = "0x" + "b" * 40
+    W3 = "0x" + "e" * 40
     C1 = "0x" + "c" * 40
     C2 = "0x" + "d" * 40
-    old_feb = si.fetch_early_buyers
-    old_fgb = si.fetch_gecko_buyers
+    old_feb = si.fetch_early_buyers_ex
+    old_fge = si.fetch_gecko_buyers_ex
+
+    def _t(*addrs):
+        return [{"to": a, "value": 1.0, "ts": 0, "is_contract": False}
+                for a in addrs]
+
     try:
-        # W1 di KEDUA sumber (2 poin/koin), W2 hanya Blockscout (1 poin/koin)
-        si.fetch_early_buyers = lambda ca, max_buyers=50: [W1, W2]
-        si.fetch_gecko_buyers = lambda ca, max_pools=3: [{"wallet": W1, "usd": 1.0,
-                                                          "price_usd": 0.1, "ts": 0}]
+        # W1 di KEDUA sumber (2,0/koin), W2 hanya Blockscout 1 beli (0,5/koin)
+        si.fetch_early_buyers_ex = lambda ca, max_buyers=50, retries=2: ("ok", _t(W1, W2))
+        si.fetch_gecko_buyers_ex = lambda ca, max_pools=3: ("ok", {W1})
         rows = si.cross_check([C1, C2])
-        by_addr = {a: (s, c) for a, s, c in rows}
-        assert W1 in by_addr and W2 in by_addr, rows
-        assert by_addr[W1][0] == 4, rows       # 2 koin × 2 poin (dual-source)
-        assert by_addr[W2][0] == 2, rows       # 2 koin × 1 poin (blockscout saja)
-        assert by_addr[W1][0] > by_addr[W2][0]
-        # GeckoTerminal-only wallet tidak masuk (bukan fantom)
-        W3 = "0x" + "e" * 40
-        si.fetch_early_buyers = lambda ca, max_buyers=50: [W1]
-        si.fetch_gecko_buyers = lambda ca, max_pools=3: [{"wallet": W3, "usd": 5.0,
-                                                          "price_usd": 0.1, "ts": 0}]
+        by = {r["address"]: r for r in rows}
+        assert W1 in by and W2 in by, rows
+        assert by[W1]["score"] == 4.0, by[W1]      # 2 koin × 2,0
+        assert by[W2]["score"] == 1.0, by[W2]      # 2 koin × 0,5
+        assert by[W1]["score"] > by[W2]["score"]
+        assert by[W1]["qualifies"] is True
+        assert by[W2]["qualifies"] is False
+
+        # GT-only: masuk tabel tapi TIDAK pernah lolos gate (karantina)
+        si.fetch_early_buyers_ex = lambda ca, max_buyers=50, retries=2: ("ok", _t(W1))
+        si.fetch_gecko_buyers_ex = lambda ca, max_pools=3: ("ok", {W1, W3})
         rows2 = si.cross_check([C1, C2])
-        assert all(a != W3 for a, _, _ in rows2), rows2
-        print("PASS screen_insiders dual-source scoring (2=both, 1=blockscout)")
+        by2 = {r["address"]: r for r in rows2}
+        assert W3 in by2, rows2
+        assert by2[W3]["qualifies"] is False, by2[W3]
+        assert by2[W3]["score"] == 0.5, by2[W3]    # 2 × 0,25
+        print("PASS screen_insiders dual-source (2,0 both / 1,0 BS kuat / 0,5 BS lemah / 0,25 GT-only)")
     finally:
-        si.fetch_early_buyers = old_feb
-        si.fetch_gecko_buyers = old_fgb
+        si.fetch_early_buyers_ex = old_feb
+        si.fetch_gecko_buyers_ex = old_fge
 
 
 def test_is_clone_risk_zero_network():

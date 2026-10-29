@@ -135,36 +135,55 @@ def test_insider_crud():
 
 def test_cross_check_intersection():
     winners = ["0x" + "c" * 40, "0x" + "d" * 40]
-    buyers_1 = ["0x" + "a" * 40, "0x" + "b" * 40]
-    buyers_2 = ["0x" + "a" * 40, "0x" + "e" * 40]   # wallet 'a' kena 2x
+    WA, WB, WE = "0x" + "a" * 40, "0x" + "b" * 40, "0x" + "e" * 40
 
-    si.fetch_early_buyers = (lambda ca, max_buyers=50:
-                             buyers_1 if ca == winners[0] else buyers_2)
+    def _t(*addrs):
+        return [{"to": a, "value": 1.0, "ts": 0, "is_contract": False}
+                for a in addrs]
+
+    si.fetch_early_buyers_ex = (lambda ca, max_buyers=50, retries=2:
+                                ("ok", _t(WA, WB) if ca == winners[0] else _t(WA, WE)))
+    si.fetch_gecko_buyers_ex = lambda ca, max_pools=3: ("ok", set())
     rows = si.cross_check(winners)
-    assert len(rows) == 1, rows
-    addr, cnt, cas = rows[0]
-    assert addr == "0x" + "a" * 40
-    assert cnt == 2
-    assert set(cas) == set(winners)
-    print("PASS screen_insiders cross_check intersection")
+    by = {r["address"]: r for r in rows}
+    # wallet 'a' satu-satunya yang muncul di 2 koin (intersection)
+    assert by[WA]["n_ca"] == 2, by
+    assert by[WB]["n_ca"] == 1 and by[WE]["n_ca"] == 1, by
+    # 1 beli per koin, Blockscout saja → 0,5/koin
+    assert by[WA]["score"] == 1.0, by[WA]
+    assert by[WA]["qualifies"] is False, by[WA]   # skor < 2,0
+    print("PASS screen_insiders cross_check intersection (n_ca + bobot BS lemah)")
 
 
 def test_screen_insiders_persist():
     path, old = _fresh_db()
     try:
         db.init()
-        rows = [("0x" + "f" * 40, 3,
-                 ["0x" + "c1" * 20, "0x" + "c2" * 20, "0x" + "c3" * 20])]
-        si.persist(rows, dry=False)
-        assert "0x" + "f" * 40 in db.get_active_insiders()
+        addr = "0x" + "f" * 40
 
-        rows2 = [("0x" + "f" * 40, 2,
-                  ["0x" + "c4" * 20, "0x" + "c5" * 20])]
-        si.persist(rows2, dry=False)
+        def _row(n_ca, score, cas):
+            return {"address": addr, "score": score, "n_ca": n_ca,
+                    "verified_cas": cas, "gt_only_cas": [],
+                    "sources": "", "qualifies": True, "needs_retry": False}
+
+        si.persist([_row(3, 3.0, ["0x" + "c1" * 20, "0x" + "c2" * 20,
+                                   "0x" + "c3" * 20])])
         row = db.list_insiders()[0]
-        assert row["win_count"] == 5, row          # naik, bukan timpa
-        assert row["win_cas"].count(",") == 4, row  # 3+2 CA
-        print("PASS screen_insiders persist (update_if_exists)")
+        assert row["win_count"] == 3 and row["score"] == 3.0, row
+
+        # Scan ulang lebih lengkap (4 CA) → skor otoritatif, boleh turun (decay)
+        si.persist([_row(4, 1.6, ["0x" + "c1" * 20, "0x" + "c2" * 20,
+                                   "0x" + "c3" * 20, "0x" + "c4" * 20])])
+        row = db.list_insiders()[0]
+        assert row["win_count"] == 4, row
+        assert row["score"] == 1.6, row
+
+        # Scan parsial (1 CA) → tidak boleh menurunkan skor maupun win_count
+        si.persist([_row(1, 0.5, ["0x" + "c5" * 20])])
+        row = db.list_insiders()[0]
+        assert row["win_count"] == 4 and row["score"] == 1.6, row
+        assert addr in db.get_active_insiders()
+        print("PASS screen_insiders persist (MAX win_count, skor otoritatif)")
     finally:
         os.unlink(path)
         config.DB_PATH = old
