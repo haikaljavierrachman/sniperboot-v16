@@ -215,7 +215,7 @@ def insider_buys_panel(window_sec=3600):
     if not rows:
         lines.append("\n_Belum ada transaksi beli insider di jendela waktu ini._")
     else:
-        lines.append("_Urutan koin paling sering dibeli dompet insider:_\n")
+        lines.append("_Urutan: jumlah dompet unik terbanyak → jumlah beli:_\n")
         for i, r in enumerate(rows, 1):
             ago = last_ago(r["last_ts"], now_i)
             mc = f"${r['mcap']:,.0f}" if r.get("mcap") else "n/a"

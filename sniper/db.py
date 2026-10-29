@@ -685,7 +685,10 @@ def top_insider_buys(window_sec=3600, limit=10, now=None):
             SELECT ca,
                    MAX(symbol) AS symbol,
                    COUNT(*) AS buy_count,
-                   COUNT(DISTINCT wallet) AS wallet_count,
+                   -- Dompet kosong (wallet="") JANGAN dihitung sebagai
+                   -- breadth: itu data tidak dikenal, bukan keroyokan.
+                   COUNT(DISTINCT CASE WHEN wallet IS NOT NULL AND wallet <> ''
+                                       THEN wallet END) AS wallet_count,
                    MAX(mcap) AS mcap,
                    MAX(liq) AS liq,
                    MAX(pair_address) AS pair_address,
@@ -693,7 +696,11 @@ def top_insider_buys(window_sec=3600, limit=10, now=None):
             FROM insider_buys
             WHERE ts >= ?
             GROUP BY ca
-            ORDER BY buy_count DESC, wallet_count DESC, last_ts DESC
+            -- v16.9 (Opsi A): peringkat utama = BREADTH (jumlah dompet unik),
+            -- baru jumlah transaksi. Koin yang dikeroyok 11 wallet berbeda
+            -- tidak boleh tenggelam di bawah 1-2 bot wash-trading yang
+            -- menembak CA yang sama puluhan kali.
+            ORDER BY wallet_count DESC, buy_count DESC, last_ts DESC
             LIMIT ?""", (cutoff, int(limit))).fetchall()
         return [dict(r) for r in rows]
 
