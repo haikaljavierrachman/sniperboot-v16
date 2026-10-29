@@ -6,6 +6,38 @@ from . import config
 _lock = threading.Lock()
 _src_cache = {"ts": 0, "rows": []}
 
+# ---------- 🚫 Alamat yang BUKAN dompet trader ----------
+# 0x…dead adalah alamat BURN. Indexer mencatat transfer/event ke alamat ini
+# sebagai "beli", sehingga satu alamat palsu bisa mengisi mayoritas tabel
+# insider_buys (pernah 18.007 baris = 60,5% dari seluruh tabel, 1.337 CA).
+# Alamat ini tidak punya kunci privat → mustahil benar-benar membeli.
+_NON_TRADER_BODY = {
+    "0" * 40,                                    # zero address
+    "0" * 36 + "dead",                           # 0x000…dead (burn)
+    "dead" + "0" * 36,                           # 0xdead000… (burn varian)
+    "0" * 39 + "1",                              # ecrecover precompile
+}
+
+
+def is_trackable_wallet(address) -> bool:
+    """True bila address bisa diperlakukan sebagai dompet trader sungguhan.
+
+    Menolak: format salah, zero address, alamat burn (...dead), dan
+    placeholder yang 32 byte pertamanya nol.
+    """
+    a = str(address or "").strip().lower()
+    if len(a) != 42 or not a.startswith("0x"):
+        return False
+    body = a[2:]
+    if body in _NON_TRADER_BODY:
+        return False
+    if int(body, 16) == 0:
+        return False
+    # pola burn/precompile: 16 byte pertama seluruhnya nol
+    if body[:32] == "0" * 32:
+        return False
+    return True
+
 
 def _conn():
     c = sqlite3.connect(config.DB_PATH)
@@ -601,6 +633,10 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
     screener saat wallet sudah ada tapi menang koin baru) → win_count
     ditambah, bukan ditimpa."""
     address = str(address).strip().lower()
+    # 🚫 Jangan pernah rekrut alamat burn/zero sebagai "insider" — auto_rotate
+    # sempat memasukkan 0x…dead dan mencemari 60% tabel insider_buys.
+    if not is_trackable_wallet(address):
+        return False
     with _lock, _conn() as c:
         _init_insider_wallets(c)
         if update_if_exists:
@@ -665,6 +701,11 @@ def _init_insider_buys(c):
 
 def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
                        pair_address="", ts=None):
+    # 🚫 Tolak alamat yang bukan dompet trader (burn/zero/precompile).
+    # Transfer ke 0x…dead bukan pembelian; mencatatnya menggelembungkan
+    # hitungan dompet dan membuat log insider tidak bisa dipercaya.
+    if wallet and not is_trackable_wallet(wallet):
+        return
     now = int(ts if ts is not None else time.time())
     with _lock, _conn() as c:
         _init_insider_buys(c)
@@ -674,6 +715,37 @@ def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
                    symbol or "?", float(mcap or 0), float(liq or 0),
                    pair_address or "", now))
         c.execute("DELETE FROM insider_buys WHERE ts < ?", (now - 86400,))
+
+
+def purge_non_trader_wallets():
+    """Hapus baris insider_buys & insider_wallets milik alamat burn/zero.
+
+    Operasi sekali-jalan untuk membersihkan data lama yang terlanjur
+    tercemar (0x…dead pernah mengisi 18.007 baris = 60% tabel).
+    Return (rows_deleted, wallets_deleted).
+    """
+    with _lock, _conn() as c:
+        _init_insider_buys(c)
+        _init_insider_wallets(c)
+        bad_buys = []
+        bad_wallets = []
+        for r in c.execute("SELECT DISTINCT wallet FROM insider_buys"):
+            w = (r["wallet"] or "").strip().lower()
+            if w and not is_trackable_wallet(w):
+                bad_buys.append(w)
+        for r in c.execute("SELECT address FROM insider_wallets"):
+            w = (r["address"] or "").strip().lower()
+            if w and not is_trackable_wallet(w):
+                bad_wallets.append(w)
+        n_buys = 0
+        for w in bad_buys:
+            cur = c.execute("DELETE FROM insider_buys WHERE wallet=?", (w,))
+            n_buys += cur.rowcount or 0
+        n_wal = 0
+        for w in bad_wallets:
+            cur = c.execute("DELETE FROM insider_wallets WHERE address=?", (w,))
+            n_wal += cur.rowcount or 0
+        return n_buys, n_wal, bad_wallets
 
 
 def top_insider_buys(window_sec=3600, limit=10, now=None):
@@ -695,6 +767,11 @@ def top_insider_buys(window_sec=3600, limit=10, now=None):
                    MAX(ts) AS last_ts
             FROM insider_buys
             WHERE ts >= ?
+              -- 🚫 Sabuk pengaman: jangan pernah tampilkan alamat burn/zero
+              -- walau ada baris lama yang lolos sebelum guard ingestion.
+              AND (wallet IS NULL OR wallet = ''
+                   OR (wallet NOT LIKE '0x00000000000000000000000000000000%'
+                       AND wallet <> '0xdead000000000000000042069420694206942069'))
             GROUP BY ca
             -- v16.9 (Opsi A): peringkat utama = BREADTH (jumlah dompet unik),
             -- baru jumlah transaksi. Koin yang dikeroyok 11 wallet berbeda

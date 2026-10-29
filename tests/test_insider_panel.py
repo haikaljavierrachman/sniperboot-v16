@@ -202,9 +202,10 @@ def test_insider_screen_pagination():
     try:
         db.init()
         for i in range(15):
-            db.add_insider_wallet("0x" + f"{i:040x}", label=f"w{i:02d}",
+            # mulai dari 1: index 0 = zero address (ditolak guard non-trader)
+            db.add_insider_wallet("0x" + "c0" * 16 + f"{i + 1:08x}", label=f"w{i:02d}",
                                   win_count=15 - i)
-        db.toggle_insider("0x" + f"{5:040x}")     # 1 wallet disabled
+        db.toggle_insider("0x" + "c0" * 16 + f"{6:08x}")     # 1 wallet disabled
 
         assert cb.PAGE_SIZE == 10, cb.PAGE_SIZE
         t, b = cb.insider_screen_panel(0)
@@ -244,13 +245,14 @@ def test_source_button_and_next_page_data():
         assert "Insider" in cb._btn_label(btn), cb._btn_label(btn)
 
         for i in range(11):
-            db.add_insider_wallet("0x" + f"{i:040x}", win_count=11 - i)
+            # mulai dari 1: index 0 = zero address (ditolak guard non-trader)
+            db.add_insider_wallet("0x" + "c0" * 16 + f"{i + 1:08x}", win_count=11 - i)
         ev2 = _FakeEvent()
         asyncio.run(cb._route(ev2, "inspage:1"))
         t, b = ev2.edited[0]
         assert "2/2" in "\n".join(cb._btn_label(b_) for b_ in _all_btns(b)), t
         rows = db.list_insiders()
-        assert rows[10]["address"] == "0x" + f"{10:040x}"  # paling bawah urutan (win_count=1)
+        assert rows[10]["address"] == "0x" + "c0" * 16 + f"{11:08x}"  # paling bawah (win_count=1)
         print("PASS sources tombol Insider + inspage konsisten urutan DB")
     finally:
         os.unlink(path)

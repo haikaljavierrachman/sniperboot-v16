@@ -30,6 +30,11 @@ TIE_A = "0x" + "cc" * 20
 TIE_B = "0x" + "dd" * 20
 
 
+def _w(n):
+    """Alamat fixture valid: 16 byte awal non-nol supaya lolos guard burn."""
+    return "0x" + "a1" * 16 + f"{n:08x}"
+
+
 def _fresh_db():
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
@@ -45,11 +50,11 @@ def test_breadth_beats_volume():
         now = int(time.time())
         # wash: 60 transaksi tapi cuma 2 dompet unik
         for i in range(60):
-            db.record_insider_buy(WASH, wallet=f"0xw{i % 2}", symbol="WASH",
+            db.record_insider_buy(WASH, wallet=_w(i % 2 + 1), symbol="WASH",
                                   mcap=30000, liq=9000, ts=now - 10)
         # crowd: 12 transaksi, 11 dompet unik
         for i in range(12):
-            db.record_insider_buy(CROWD, wallet=f"0xc{i % 11}", symbol="CROWD",
+            db.record_insider_buy(CROWD, wallet=_w(i % 11 + 1), symbol="CROWD",
                                   mcap=53000, liq=12000, ts=now - 20)
 
         rows = db.top_insider_buys(window_sec=3600, limit=10, now=now)
@@ -69,8 +74,8 @@ def test_empty_wallet_not_counted():
         for _ in range(30):
             db.record_insider_buy(WASH, wallet="", symbol="WASH",
                                   ts=now - 5)
-        db.record_insider_buy(CROWD, wallet="0xc0", symbol="CROWD", ts=now - 15)
-        db.record_insider_buy(CROWD, wallet="0xc1", symbol="CROWD", ts=now - 6)
+        db.record_insider_buy(CROWD, wallet=_w(1), symbol="CROWD", ts=now - 15)
+        db.record_insider_buy(CROWD, wallet=_w(2), symbol="CROWD", ts=now - 6)
 
         rows = db.top_insider_buys(window_sec=3600, limit=10, now=now)
         assert rows[0]["symbol"] == "CROWD", rows
@@ -86,17 +91,17 @@ def test_tiebreaks():
     path, old = _fresh_db()
     try:
         now = int(time.time())
-        db.record_insider_buy(TIE_A, wallet="0xa1", symbol="A", ts=now - 30)
-        db.record_insider_buy(TIE_B, wallet="0xb1", symbol="B", ts=now - 30)
-        db.record_insider_buy(TIE_B, wallet="0xb2", symbol="B", ts=now - 20)
-        db.record_insider_buy(TIE_A, wallet="0xa2", symbol="A", ts=now - 10)
+        db.record_insider_buy(TIE_A, wallet=_w(101), symbol="A", ts=now - 30)
+        db.record_insider_buy(TIE_B, wallet=_w(201), symbol="B", ts=now - 30)
+        db.record_insider_buy(TIE_B, wallet=_w(202), symbol="B", ts=now - 20)
+        db.record_insider_buy(TIE_A, wallet=_w(102), symbol="A", ts=now - 10)
 
         rows = db.top_insider_buys(window_sec=3600, limit=10, now=now)
         # wallet_count sama (2), buy_count sama (2) → last_ts terbaru menang
         assert [r["symbol"] for r in rows] == ["A", "B"], rows
 
         # buy_count menentukan saat wallet_count seri
-        db.record_insider_buy(TIE_B, wallet="0xb2", symbol="B", ts=now - 5)
+        db.record_insider_buy(TIE_B, wallet=_w(202), symbol="B", ts=now - 5)
         rows = db.top_insider_buys(window_sec=3600, limit=10, now=now)
         assert rows[0]["symbol"] == "B" and rows[0]["buy_count"] == 3, rows
         print("PASS tiebreak: buy_count lalu last_ts")
@@ -109,8 +114,8 @@ def test_window_filter():
     path, old = _fresh_db()
     try:
         now = int(time.time())
-        db.record_insider_buy(WASH, wallet="0xa1", symbol="OLD", ts=now - 7200)
-        db.record_insider_buy(CROWD, wallet="0xb1", symbol="NEW", ts=now - 60)
+        db.record_insider_buy(WASH, wallet=_w(101), symbol="OLD", ts=now - 7200)
+        db.record_insider_buy(CROWD, wallet=_w(201), symbol="NEW", ts=now - 60)
 
         rows = db.top_insider_buys(window_sec=600, limit=10, now=now)
         assert [r["symbol"] for r in rows] == ["NEW"], rows
