@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -51,16 +52,22 @@ def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
     # 3. + 4. Petik pembeli early lalu iris silang (≥2 koin pemenang)
     new_rows = si.cross_check(runners) if runners else []
 
-    # 5. Daftarkan kandidat sebagai insider baru (dedupe: wallet yang
-    #    sudah terdaftar hanya menambah win_count).
+    # 5. Daftarkan kandidat sebagai insider baru — HANYA yang lolos gate
+    #    skor 2 sumber (skor ≥2,0 dan ≥2 CA terverifikasi Blockscout).
+    candidates = [r for r in new_rows if r.get("qualifies")]
     added = 0
     if not dry:
         existing = {r["address"] for r in db.list_insiders()}
-        for addr, cnt, cas in new_rows:
-            db.add_insider_wallet(addr, label="auto_rotate", win_count=cnt,
-                                  notes="auto: rotasi koin runner",
-                                  win_cas=",".join(cas),
-                                  update_if_exists=True)
+        for r in candidates:
+            addr = r["address"]
+            db.add_insider_wallet(
+                addr, label="auto_rotate", win_count=r["n_ca"],
+                notes="auto: rotasi koin runner",
+                win_cas=",".join(r["verified_cas"]),
+                update_if_exists=True, set_wins=True,
+                score=r["score"], sources=r["sources"],
+                last_verified=0 if r["needs_retry"] else int(time.time()),
+                enabled=1)
             if addr not in existing:
                 added += 1
 
@@ -71,6 +78,7 @@ def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
                "total_active": total_active,
                "runners": len(runners),
                "new_candidates": len(new_rows),
+               "qualified": len(candidates),
                "dry": dry}
     _print_summary(runners, new_rows, summary)
     return summary
@@ -79,9 +87,11 @@ def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
 def _print_summary(runners, new_rows, summary):
     print("\n🔄 ROTASI INSIDER — ringkasan")
     print(f"  koin runner dipakai : {summary['runners']}")
-    print(f"  kandidat baru (≥2 koin) : {summary['new_candidates']}")
-    for addr, cnt, cas in new_rows[:10]:
-        print(f"    + {addr}  win={cnt}  CAs={','.join(c[:10] for c in cas)}")
+    print(f"  kandidat (≥2 CA)    : {summary['new_candidates']}")
+    print(f"  lolos gate skor     : {summary['qualified']}")
+    for r in new_rows[:10]:
+        print(f"    {'✅' if r.get('qualifies') else '· '} {r['address']}  "
+              f"skor={r['score']:.2f}  win={r['n_ca']}")
     print(f"  wallet dinonaktifkan (prune) : {summary['disabled']}")
     print(f"  total wallet aktif sekarang  : {summary['total_active']}")
     if summary["dry"]:

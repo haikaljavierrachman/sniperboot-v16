@@ -98,15 +98,11 @@ def _dexscreener_profiles_cas() -> list[str]:
 
 
 def fetch_gainers(limit=10) -> list[str]:
-    """CA koin Robinhood Chain yang geaak trade — multi sumber:
+    """CA koin Robinhood Chain aktif di pasar luas (Dexscreener):
 
       a. Dexscreener token-profiles + token-boosts (chainId=robinhood)
       b. Search multi-query: v4, robinhood, ETH, YMB (chainId=robinhood)
-      c. Posisi sukses lokal (closed_tp1 / closed_tp2) dari DB sniper
-      d. Dedup CA + urutkan berdasarkan volume/priceChange h24 menurun
-
-    Jaringan gabung merge → 15-30 runner nyata walau search `robinhood`
-    murni kosong.
+      c. Dedup CA + urutkan berdasarkan volume/priceChange h24 menurun
     """
     cad: dict[str, tuple[float, float]] = {}   # ca → (vol24, chg24)
 
@@ -127,22 +123,7 @@ def fetch_gainers(limit=10) -> list[str]:
             vol0, chg0 = cad.get(ca, (0.0, 0.0))
             cad[ca] = (max(vol, vol0), max(chg, chg0))
 
-    # (c) posisi sukses lokal — CA yang pernah close TP1/TP2 di DB kita
-    try:
-        db.init()
-        with db._lock, db._conn() as c:
-            rows = c.execute(
-                "SELECT DISTINCT ca FROM positions "
-                "WHERE status IN ('closed_tp1','closed_tp2')").fetchall()
-        for (ca,) in rows:
-            ca = (ca or "").lower()
-            if ca.startswith("0x"):
-                vol0, chg0 = cad.get(ca, (0.0, 0.0))
-                cad.setdefault(ca, (vol0, chg0))
-    except Exception as e:
-        print(f"⚠️ DB closed-positions gagal: {e}")
-
-    # (d) skor = volume24 + priceChange24 — dedup justru di dict di atas.
+    # (c) skor = volume24 + priceChange24 — dedup di dict di atas.
     scored = sorted(cad.items(), key=lambda kv: kv[1][0] + kv[1][1],
                     reverse=True)
     return [ca for ca, _ in scored[:limit]]

@@ -307,16 +307,31 @@ def test_rotate_recruits_and_reports():
         rot.si.fetch_gainers = (lambda limit=15: [runner1, runner2])
         rot.si.fetch_early_buyers = (lambda ca, max_buyers=50:
                                      [] if ca == runner1 else [])
+        weak = "0x" + "a" * 40
         rot.si.cross_check = (lambda cas: [
-            (w1, 2, [runner1, runner2]),
-            (w2, 2, [runner1, runner2]),
+            {"address": w1, "score": 4.0, "n_ca": 2,
+             "verified_cas": [runner1, runner2], "gt_only_cas": [],
+             "sources": f"{runner1}|bs+gt,{runner2}|bs+gt",
+             "qualifies": True, "needs_retry": False},
+            {"address": w2, "score": 2.0, "n_ca": 2,
+             "verified_cas": [runner1, runner2], "gt_only_cas": [],
+             "sources": f"{runner1}|bs,{runner2}|bs",
+             "qualifies": True, "needs_retry": False},
+            # tidak lolos gate → TIDAK boleh direkrut
+            {"address": weak, "score": 1.0, "n_ca": 2,
+             "verified_cas": [runner1, runner2], "gt_only_cas": [],
+             "sources": f"{runner1}|bs,{runner2}|bs",
+             "qualifies": False, "needs_retry": False},
         ])
 
         summary = rot.rotate(runner_limit=2, max_inactive_days=14)
         assert summary["disabled"] == 1, summary       # boncos di-prune
+        assert summary["qualified"] == 2, summary      # gate skor 2 sumber
         assert summary["added"] == 2, summary          # 2 rekrutan baru
         assert summary["total_active"] == 2, summary   # boncos mati, 2 hidup
         assert _insider_row(w1)["label"] == "auto_rotate"
+        assert _insider_row(w1)["score"] == 4.0, _insider_row(w1)
+        assert _insider_row(weak) is None, "wallet di bawah gate ikut direkrut"
         assert _insider_row(boncos)["enabled"] == 0
         assert w1 in db.get_active_insiders() and w2 in db.get_active_insiders()
 
