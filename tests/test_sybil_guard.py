@@ -77,6 +77,26 @@ class TestSybilGuard(unittest.TestCase):
             r = [x for x in db.list_insiders(only_enabled=True) if x["address"] == w][0]
             self.assertEqual(r["enabled"], 1)
 
+    def test_dynamic_micro_pair_recurring_detected(self):
+        w1 = "0x1111111111111111111111111111111111111111"
+        w2 = "0x2222222222222222222222222222222222222222"
+        db.add_insider_wallet(w1, label="pair1", win_count=5, enabled=1)
+        db.add_insider_wallet(w2, label="pair2", win_count=5, enabled=1)
+
+        now = int(time.time())
+        # Pasangan w1 dan w2 beli barengan di 3 koin berbeda (span 10 detik)
+        for i in range(3):
+            ca_i = f"0x{'%02x' % (i + 50) * 20}"
+            db.record_insider_buy(ca_i, wallet=w1, symbol=f"COIN{i}", ts=now + i * 100)
+            db.record_insider_buy(ca_i, wallet=w2, symbol=f"COIN{i}", ts=now + i * 100 + 10)
+
+        # Jalankan deteksi global (ca=None)
+        clusters = db.detect_and_purge_sybil_clusters()
+        micro_clusters = [cl for cl in clusters if cl.get("tier") == "micro_pair"]
+        self.assertGreaterEqual(len(micro_clusters), 1)
+        self.assertTrue(db.is_sybil_blacklisted(w1))
+        self.assertTrue(db.is_sybil_blacklisted(w2))
+
     def test_sybil_blacklisted_wallet_cannot_be_readded(self):
         w = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         # Blacklist manual

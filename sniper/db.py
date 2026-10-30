@@ -864,26 +864,23 @@ def list_sybil_blacklist() -> list[dict]:
 
 
 def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) -> list[dict]:
-    """Deteksi klaster wash-trading dev bot:
-    Bila >= min_wallets (default 7) dompet membeli CA yang sama dalam
-    jendela waktu <= window_sec (default 60s):
-    - Seluruh dompet di klaster tersebut ditandai sebagai sybil
-    - Disimpan di sybil_blacklist
-    - Dinonaktifkan di insider_wallets (enabled=0, label='sybil_cluster')
-    - Dihapus / dibersihkan dari insider_buys agar panel tidak tercemar.
-    Return list info klaster yang terdeteksi:
-    [{'ca': ..., 'symbol': ..., 'wallets': [...], 'span_sec': ..., 'detected_at': ...}, ...]
+    """Deteksi klaster wash-trading dev bot (Matriks Dinamis 3-Tier):
+    - Tier 1 (Swarm): >= min_wallets (default 6) dlm <= window_sec (default 45s) di 1 koin.
+    - Tier 2 (Squad): 4-5 dompet dlm <= 30s berulang di >= 2 koin berbeda.
+    - Tier 3 (Micro Pair): 2-3 dompet dlm <= 25s berulang di >= 3 koin berbeda.
+    Semua dompet sybil diblokir, masuk blacklist, dinonaktifkan di insider_wallets,
+    dan dibersihkan dari insider_buys.
     """
     if min_wallets is None:
         try:
-            min_wallets = int(get("sybil_cluster_min_wallets", str) or 7)
+            min_wallets = int(get("sybil_cluster_min_wallets", str) or 6)
         except Exception:
-            min_wallets = 7
+            min_wallets = 6
     if window_sec is None:
         try:
-            window_sec = int(get("sybil_cluster_window_sec", str) or 60)
+            window_sec = int(get("sybil_cluster_window_sec", str) or 45)
         except Exception:
-            window_sec = 60
+            window_sec = 45
 
     query = """
         SELECT ca, wallet, ts, symbol
@@ -909,6 +906,7 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
         all_sybil_wallets = set()
         now_ts = int(time.time())
 
+        # ---- Tier 1: Swarm (Keroyokan di 1 koin) ----
         for c_ca, buys in ca_buys.items():
             sym = buys[0][2] if buys else ""
             n = len(buys)
@@ -926,6 +924,7 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
                 if len(w_set) >= min_wallets:
                     wallets_list = list(w_set)
                     clusters.append({
+                        "tier": "swarm",
                         "ca": c_ca,
                         "symbol": sym,
                         "wallets": wallets_list,
@@ -935,21 +934,52 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
                     all_sybil_wallets.update(wallets_list)
                     break
 
+        # ---- Tier 2 & 3: Multi-coin Co-occurrence (Pasangan/Regu berulang) ----
+        # Hanya jalan saat scan global (ca=None) atau seluruh DB
+        if not ca and len(ca_buys) >= 2:
+            pair_cas = defaultdict(set)
+            for c_ca, buys in ca_buys.items():
+                n = len(buys)
+                for i in range(n):
+                    ti, wi, _ = buys[i]
+                    for j in range(i + 1, n):
+                        tj, wj, _ = buys[j]
+                        if tj - ti <= 25:
+                            if wi != wj:
+                                pair = tuple(sorted([wi, wj]))
+                                pair_cas[pair].add(c_ca)
+                        else:
+                            break
+
+            for (w1, w2), cas in pair_cas.items():
+                if len(cas) >= 3:
+                    clusters.append({
+                        "tier": "micro_pair",
+                        "ca": ",".join(list(cas)[:3]),
+                        "symbol": "MULTI",
+                        "wallets": [w1, w2],
+                        "span_sec": 25,
+                        "detected_at": now_ts,
+                    })
+                    all_sybil_wallets.add(w1)
+                    all_sybil_wallets.add(w2)
+
         if all_sybil_wallets:
             for cl in clusters:
+                tier_name = cl.get("tier", "swarm")
                 for w in cl["wallets"]:
                     c.execute("""
                         INSERT OR REPLACE INTO sybil_blacklist
                         (address, reason, ca, wallet_count, span_sec, detected_at)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    """, (w, f"klaster wash-trading dev ({len(cl['wallets'])} wallet dlm {cl['span_sec']}s)",
+                    """, (w, f"klaster sybil {tier_name} ({len(cl['wallets'])} wallet dlm {cl['span_sec']}s)",
                           cl["ca"], len(cl["wallets"]), cl["span_sec"], now_ts))
                     c.execute("""
                         UPDATE insider_wallets
                         SET enabled = 0, label = 'sybil_cluster',
                             notes = ?
                         WHERE address = ?
-                    """, (f"klaster wash trading ({len(cl['wallets'])} wallet di CA {cl['ca'][:10]}…)", w))
+                    """, (f"klaster wash trading {tier_name} ({len(cl['wallets'])} wallet)", w))
                     c.execute("DELETE FROM insider_buys WHERE wallet = ?", (w,))
 
         return clusters
