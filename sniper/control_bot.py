@@ -368,10 +368,6 @@ def settings_panel():
         exit_line = f"📈 Moonbag runner: **trailing {trail_pct:.0f}% dari ATH** (TP2 mati)"
     else:
         exit_line = "📈 Moonbag runner: **dibiarkan terbuka** (TP2 & trailing mati)"
-    try:
-        n_parents = len(clone_guard.list_parent_tokens())
-    except Exception:
-        n_parents = 0
     lines = [
         "⚙️ **Settings Utama** (tap untuk edit)\n",
         f"💵 Buy size: **${buy_val}** / call",
@@ -382,7 +378,6 @@ def settings_panel():
         f"• Min Liquidity: **${db.get('scanner_min_liq', str)}**",
         f"• Max Market Cap: **${db.get('scanner_mcap_max', str)}**",
         f"• Dev Max: **{db.get('dev_max_pct', str)}%** · Top 10 Max: **{db.get('top10_max_pct', str)}%**",
-        f"• Parent Shield: **{n_parents} koin induk** (blokir klon parasit otomatis)",
         f"• Gas L2: **-{db.get('paper_gas_eth', float)*2400:.2f}** · Spread entry (breakeven): **2.5%** · Slippage: **2%**",
     ]
     buttons = [

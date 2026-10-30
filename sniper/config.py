@@ -182,9 +182,6 @@ SETTING_DEFAULTS = {
     "goldilocks_max_slippage":    "0.25",
     "goldilocks_tp1":             "0.35",
     "goldilocks_tp2":             "0.80",
-    # ---- 🛡️ Parent Shield (v16.9) ----
-    # 0 = nonaktif (koin klon berpotensi dipompa tetap disniper jika lolos math), 1 = blokir nama sama
-    "parent_shield_enabled":         "0",
     # ---- 🤖 Sybil Cluster Guard: anti wash-trading dev bot (v16.9) ----
     # Jika N dompet insider beli koin yang sama dalam jendela waktu W detik:
     # Teridentifikasi sebagai klaster wash-trading dev bot → blokir & buang.
@@ -269,7 +266,6 @@ SETTING_LABELS = {
     "goldilocks_max_slippage":    "⚡ Goldilocks: maks slippage quote",
     "goldilocks_tp1":             "⚡ Goldilocks: TP1 (0.35 = +35%)",
     "goldilocks_tp2":             "⚡ Goldilocks: TP2 (0.80 = +80%)",
-    "parent_shield_enabled":      "🛡 Parent Shield: blokir koin klon peniru induk (1/0, default 0)",
     "sybil_cluster_guard_on":     "🤖 Sybil Guard: blokir klaster wash-trading dev bot (1/0)",
     "sybil_cluster_min_wallets":  "🤖 Sybil Guard: min dompet serempak klaster (7)",
     "sybil_cluster_window_sec":   "🤖 Sybil Guard: jendela waktu serempak detik (60)",
