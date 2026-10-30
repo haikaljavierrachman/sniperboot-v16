@@ -162,3 +162,16 @@ def trades(pool_addr: str, before_ts=None) -> list:
         if n:
             out.append(n)
     return out
+
+
+def trending_pools() -> list:
+    """Pools paling trending di Robinhood Chain via GeckoTerminal. Gagal → []."""
+    data = _get(f"/networks/{NETWORK}/trending_pools")
+    return (data or {}).get("data") or []
+
+
+def pools(page: int = 1) -> list:
+    """Pools teratas berdasarkan volume/likuiditas di Robinhood Chain. Gagal → []."""
+    data = _get(f"/networks/{NETWORK}/pools?page={page}")
+    return (data or {}).get("data") or []
+

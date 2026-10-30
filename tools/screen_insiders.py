@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from curl_cffi import requests as crequests  # noqa: E402
-from sniper import config, db  # noqa: E402
+from sniper import config, db, geckoterminal as gt  # noqa: E402
 from sniper import dexscreener as dx  # noqa: E402
 from sniper.tracker import QUOTE_ASSETS  # noqa: E402
 
@@ -97,21 +97,74 @@ def _dexscreener_profiles_cas() -> list[str]:
     return cas
 
 
-def fetch_gainers(limit=10) -> list[str]:
-    """CA koin Robinhood Chain aktif di pasar luas (Dexscreener):
+GT_EXCLUDED_CAS = {
+    "0x0000000000000000000000000000000000000000",
+    "0x0bd7d308f8e1639fab988df18a8011f41eacad73",  # WETH
+    "0x5fc5360d0400a0fd4f2af552add042d716f1d168",  # USDG
+}
 
-      a. Dexscreener token-profiles + token-boosts (chainId=robinhood)
-      b. Search multi-query: v4, robinhood, ETH, YMB (chainId=robinhood)
-      c. Dedup CA + urutkan berdasarkan volume/priceChange h24 menurun
+
+def _geckoterminal_rh_cas() -> list[tuple[float, float, str]]:
+    """CA Robinhood Chain dari trending pools & top pools GeckoTerminal.
+    Return list (volume24, priceChange24, ca)."""
+    out = []
+    seen = set()
+    pools_data = []
+    try:
+        pools_data.extend(gt.trending_pools() or [])
+    except Exception as e:
+        print(f"⚠️ GeckoTerminal trending_pools gagal: {e}")
+    try:
+        pools_data.extend(gt.pools(page=1) or [])
+    except Exception as e:
+        print(f"⚠️ GeckoTerminal pools gagal: {e}")
+
+    for p in pools_data:
+        b_id = (p.get("relationships", {}).get("base_token", {}).get("data", {}).get("id") or "").replace("robinhood_", "").lower()
+        q_id = (p.get("relationships", {}).get("quote_token", {}).get("data", {}).get("id") or "").replace("robinhood_", "").lower()
+        ca = None
+        if b_id.startswith("0x") and b_id not in GT_EXCLUDED_CAS:
+            ca = b_id
+        elif q_id.startswith("0x") and q_id not in GT_EXCLUDED_CAS:
+            ca = q_id
+        if not ca or ca in seen:
+            continue
+        seen.add(ca)
+
+        attr = p.get("attributes") or {}
+        try:
+            vol = float(((attr.get("volume_usd") or {}).get("h24")) or 0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        try:
+            chg = float(((attr.get("price_change_percentage") or {}).get("h24")) or 0)
+        except (TypeError, ValueError):
+            chg = 0.0
+        out.append((vol, chg, ca))
+    return out
+
+
+def fetch_gainers(limit=10) -> list[str]:
+    """CA koin Robinhood Chain aktif di pasar luas (GeckoTerminal + Dexscreener):
+
+      a. GeckoTerminal trending_pools + pools (khusus jaringan Robinhood)
+      b. Dexscreener token-profiles + token-boosts (chainId=robinhood)
+      c. Dexscreener search multi-query: v4, robinhood, ETH, YMB (chainId=robinhood)
+      d. Dedup CA + urutkan berdasarkan volume/priceChange h24 menurun
     """
     cad: dict[str, tuple[float, float]] = {}   # ca → (vol24, chg24)
 
-    # (a) profiles + boosts — endpoint token-list, tanpa metric harga
+    # (a) GeckoTerminal native Robinhood pools (trending + top pools)
+    for vol, chg, ca in _geckoterminal_rh_cas():
+        vol0, chg0 = cad.get(ca, (0.0, 0.0))
+        cad[ca] = (max(vol, vol0), max(chg, chg0))
+
+    # (b) profiles + boosts — endpoint token-list, tanpa metric harga
     for ca in _dexscreener_profiles_cas():
         if ca not in cad:
             cad[ca] = (0.0, 0.0)           # metric akan diisi dari query (b)
 
-    # (b) search multi-query — metric volume/priceChange nyata
+    # (c) search multi-query — metric volume/priceChange nyata
     for q in ("v4", "robinhood", "ETH", "YMB"):
         try:
             r = _get(DEX_SEARCH_MULTI.format(q=q))
@@ -123,7 +176,7 @@ def fetch_gainers(limit=10) -> list[str]:
             vol0, chg0 = cad.get(ca, (0.0, 0.0))
             cad[ca] = (max(vol, vol0), max(chg, chg0))
 
-    # (c) skor = volume24 + priceChange24 — dedup di dict di atas.
+    # (d) skor = volume24 + priceChange24 — dedup di dict di atas.
     scored = sorted(cad.items(), key=lambda kv: kv[1][0] + kv[1][1],
                     reverse=True)
     return [ca for ca, _ in scored[:limit]]
