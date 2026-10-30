@@ -317,6 +317,14 @@ def _dedup_check_send(wallet: str, ca: str, pair, now=None):
                 liq=dx.liq_usd_or_none(pair) or 0 if pair else 0,
                 pair_address=(pair or {}).get("pairAddress") or "",
                 ts=int(ts))
+            # ---- 🤖 Sybil Guard: cek apakah transaksi ini memicu klaster wash-trading ----
+            if (db.get("sybil_cluster_guard_on", str) or "1") == "1":
+                clusters = db.detect_and_purge_sybil_clusters(ca=ca)
+                if clusters:
+                    cl = clusters[0]
+                    print(f"[sybil-guard] 🚨 Klaster wash-trading terdeteksi di {cl['symbol']} ({ca[:10]}…): "
+                          f"{len(cl['wallets'])} dompet dalam {cl['span_sec']}s diblokir & dibuang!")
+                    return None
         except Exception:
             pass
         key = (ca or "").lower()

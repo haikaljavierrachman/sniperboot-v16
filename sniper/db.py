@@ -94,6 +94,13 @@ def init():
                 c.execute(f"ALTER TABLE calls ADD COLUMN {col}")
             except sqlite3.OperationalError:
                 pass
+        c.execute("""CREATE TABLE IF NOT EXISTS sybil_blacklist(
+            address TEXT PRIMARY KEY,
+            reason TEXT,
+            ca TEXT,
+            wallet_count INTEGER,
+            span_sec INTEGER,
+            detected_at INTEGER)""")
         for k, v in config.SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         # v16.5 (Solusi B): migrasi DB lama — longgarkan slippage anchor
@@ -675,7 +682,7 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
     address = str(address).strip().lower()
     # 🚫 Jangan pernah rekrut alamat burn/zero sebagai "insider" — auto_rotate
     # sempat memasukkan 0x…dead dan mencemari 60% tabel insider_buys.
-    if not is_trackable_wallet(address):
+    if not is_trackable_wallet(address) or is_sybil_blacklisted(address):
         return False
     with _lock, _conn() as c:
         _init_insider_wallets(c)
@@ -757,11 +764,13 @@ def _init_insider_buys(c):
 
 def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
                        pair_address="", ts=None):
-    # 🚫 Tolak alamat yang bukan dompet trader (burn/zero/precompile).
+    # 🚫 Tolak alamat yang bukan dompet trader (burn/zero/precompile/sybil blacklist).
     # Transfer ke 0x…dead bukan pembelian; mencatatnya menggelembungkan
     # hitungan dompet dan membuat log insider tidak bisa dipercaya.
-    if wallet and not is_trackable_wallet(wallet):
-        return
+    if wallet:
+        w_clean = str(wallet).strip().lower()
+        if not is_trackable_wallet(w_clean) or is_sybil_blacklisted(w_clean):
+            return
     now = int(ts if ts is not None else time.time())
     with _lock, _conn() as c:
         _init_insider_buys(c)
@@ -823,11 +832,12 @@ def top_insider_buys(window_sec=3600, limit=10, now=None):
                    MAX(ts) AS last_ts
             FROM insider_buys
             WHERE ts >= ?
-              -- 🚫 Sabuk pengaman: jangan pernah tampilkan alamat burn/zero
+              -- 🚫 Sabuk pengaman: jangan pernah tampilkan alamat burn/zero atau sybil blacklist
               -- walau ada baris lama yang lolos sebelum guard ingestion.
               AND (wallet IS NULL OR wallet = ''
                    OR (wallet NOT LIKE '0x00000000000000000000000000000000%'
-                       AND wallet <> '0xdead000000000000000042069420694206942069'))
+                       AND wallet <> '0xdead000000000000000042069420694206942069'
+                       AND wallet NOT IN (SELECT address FROM sybil_blacklist)))
             GROUP BY ca
             -- v16.9 (Opsi A): peringkat utama = BREADTH (jumlah dompet unik),
             -- baru jumlah transaksi. Koin yang dikeroyok 11 wallet berbeda
@@ -836,6 +846,113 @@ def top_insider_buys(window_sec=3600, limit=10, now=None):
             ORDER BY wallet_count DESC, buy_count DESC, last_ts DESC
             LIMIT ?""", (cutoff, int(limit))).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------- 🤖 Anti Wash-Trading Sybil Cluster (v16.9) ----------
+
+def is_sybil_blacklisted(address: str) -> bool:
+    if not address:
+        return False
+    a = str(address).strip().lower()
+    with _lock, _conn() as c:
+        return c.execute("SELECT 1 FROM sybil_blacklist WHERE address = ?", (a,)).fetchone() is not None
+
+
+def list_sybil_blacklist() -> list[dict]:
+    with _lock, _conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM sybil_blacklist ORDER BY detected_at DESC").fetchall()]
+
+
+def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) -> list[dict]:
+    """Deteksi klaster wash-trading dev bot:
+    Bila >= min_wallets (default 7) dompet membeli CA yang sama dalam
+    jendela waktu <= window_sec (default 60s):
+    - Seluruh dompet di klaster tersebut ditandai sebagai sybil
+    - Disimpan di sybil_blacklist
+    - Dinonaktifkan di insider_wallets (enabled=0, label='sybil_cluster')
+    - Dihapus / dibersihkan dari insider_buys agar panel tidak tercemar.
+    Return list info klaster yang terdeteksi:
+    [{'ca': ..., 'symbol': ..., 'wallets': [...], 'span_sec': ..., 'detected_at': ...}, ...]
+    """
+    if min_wallets is None:
+        try:
+            min_wallets = int(get("sybil_cluster_min_wallets", str) or 7)
+        except Exception:
+            min_wallets = 7
+    if window_sec is None:
+        try:
+            window_sec = int(get("sybil_cluster_window_sec", str) or 60)
+        except Exception:
+            window_sec = 60
+
+    query = """
+        SELECT ca, wallet, ts, symbol
+        FROM insider_buys
+        WHERE wallet IS NOT NULL AND wallet <> ''
+    """
+    params = []
+    if ca:
+        query += " AND ca = ?"
+        params.append(str(ca).strip().lower())
+    query += " ORDER BY ca, ts ASC"
+
+    with _lock, _conn() as c:
+        _init_insider_buys(c)
+        _init_insider_wallets(c)
+        rows = c.execute(query, params).fetchall()
+        from collections import defaultdict
+        ca_buys = defaultdict(list)
+        for r in rows:
+            ca_buys[r["ca"]].append((r["ts"], (r["wallet"] or "").strip().lower(), r["symbol"]))
+
+        clusters = []
+        all_sybil_wallets = set()
+        now_ts = int(time.time())
+
+        for c_ca, buys in ca_buys.items():
+            sym = buys[0][2] if buys else ""
+            n = len(buys)
+            for i in range(n):
+                t0 = buys[i][0]
+                w_set = {buys[i][1]}
+                span_sec = 0
+                for j in range(i + 1, n):
+                    t1 = buys[j][0]
+                    if t1 - t0 <= window_sec:
+                        w_set.add(buys[j][1])
+                        span_sec = t1 - t0
+                    else:
+                        break
+                if len(w_set) >= min_wallets:
+                    wallets_list = list(w_set)
+                    clusters.append({
+                        "ca": c_ca,
+                        "symbol": sym,
+                        "wallets": wallets_list,
+                        "span_sec": span_sec,
+                        "detected_at": now_ts,
+                    })
+                    all_sybil_wallets.update(wallets_list)
+                    break
+
+        if all_sybil_wallets:
+            for cl in clusters:
+                for w in cl["wallets"]:
+                    c.execute("""
+                        INSERT OR REPLACE INTO sybil_blacklist
+                        (address, reason, ca, wallet_count, span_sec, detected_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (w, f"klaster wash-trading dev ({len(cl['wallets'])} wallet dlm {cl['span_sec']}s)",
+                          cl["ca"], len(cl["wallets"]), cl["span_sec"], now_ts))
+                    c.execute("""
+                        UPDATE insider_wallets
+                        SET enabled = 0, label = 'sybil_cluster',
+                            notes = ?
+                        WHERE address = ?
+                    """, (f"klaster wash trading ({len(cl['wallets'])} wallet di CA {cl['ca'][:10]}…)", w))
+                    c.execute("DELETE FROM insider_buys WHERE wallet = ?", (w,))
+
+        return clusters
 
 
 

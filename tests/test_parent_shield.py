@@ -17,6 +17,7 @@ class TestParentShield(unittest.TestCase):
         self.old_db_path = config.DB_PATH
         config.DB_PATH = self.db_path
         db.init()
+        db.set_("parent_shield_enabled", "1")
 
     def tearDown(self):
         config.DB_PATH = self.old_db_path

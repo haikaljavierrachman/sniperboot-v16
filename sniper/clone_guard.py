@@ -506,6 +506,7 @@ def is_clone_risk(ca: str, symbol: str = "", name: str = "",
     if not fp and not sym:
         return False, "clone_guard: belum terdaftar (fail-open)"
 
+    ps_enabled = str(db.get("parent_shield_enabled", str) or "0") == "1"
     reasons = []
     with db._lock, db._conn() as c:
         _init_tables(c)
@@ -515,8 +516,10 @@ def is_clone_risk(ca: str, symbol: str = "", name: str = "",
         if own and own["status"] == "failed":
             reasons.append(f"CA sudah ditandai gagal ({own['reason'] or 'failed'})")
         # ---- cek 0a: parent-shield (koin induk dengan simbol sama tapi beda CA) ----
+        # Hanya aktif bila setting parent_shield_enabled = "1" (default 0 agar koin klon
+        # yang berpotensi dipompa dev di menit 1-2 tetap bisa ditembak sniperbot).
         sym_clean = sym.upper()
-        if len(sym_clean) >= 2:
+        if ps_enabled and len(sym_clean) >= 2:
             prow = c.execute(
                 "SELECT ca, mcap, liq FROM parent_tokens WHERE UPPER(symbol)=?",
                 (sym_clean,)

@@ -319,6 +319,12 @@ def _insider_header(rows):
     active_n = sum(1 for r in rows if r["enabled"])
     last = _last_seen_seen(rows)
     lines = [f"🕵️ **Insider Wallets** — aktif **{active_n}/{len(rows)}**"]
+    try:
+        sybil_n = len(db.list_sybil_blacklist())
+        if sybil_n:
+            lines.append(f"🤖 sybil guard: **{sybil_n}** bot wash-trading diblokir")
+    except Exception:
+        pass
     if last:
         import time as _t
         lines.append(f"🕒 last_seen terbaru: **{last_ago(last, int(_t.time()))}**")

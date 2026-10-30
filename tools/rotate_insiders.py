@@ -44,8 +44,10 @@ def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
     diimpor (asyncio.to_thread dari tracker.auto_rotation_loop)."""
     db.init()
 
-    # 1. Prune: nonaktifkan wallet lunglai/boncos
+    # 1. Prune: nonaktifkan wallet lunglai/boncos & klaster wash-trading sybil
     disabled = 0 if dry else db.prune_stale_insiders(max_inactive_days)
+    if not dry and (db.get("sybil_cluster_guard_on", str) or "1") == "1":
+        db.detect_and_purge_sybil_clusters()
 
     # 2. Ambil koin runner terbaru
     runners = si.fetch_gainers(runner_limit)
